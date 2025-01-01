@@ -10,6 +10,13 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+[env.production.vars]
+IDENTITY = '0xC361A6E67822a0EDc17D899227dd9FC50BD62F42'
+FROM_BLOCK = 29000000
+GOODSERVER_URL = 'https://goodserver.gooddollar.org/verify/topwallet'
+#SUBGRAPH_URL = ''
+#CELOSCAN_KEY
+
 # Automatically place your workloads in an optimal location to minimize latency.
 # If you are running back-end logic in a Worker, running it closer to your back-end infrastructure
 # rather than the end user may result in better performance.
