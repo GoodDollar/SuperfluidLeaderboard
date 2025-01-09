@@ -12,9 +12,13 @@
  */
 import { isArray, first, isFunction, noop, groupBy, last, add } from 'lodash';
 import { celo } from 'viem/chains';
-import { createPublicClient, getContract, http, padHex, parseAbi } from 'viem';
+import { createPublicClient, getContract, http, padHex, parseAbi, getAddress } from 'viem';
+import { StackClient } from '@stackso/js-core';
+
+const CAMPAIGN_DAYS = 730n; //assuming two years airdrop campain
 
 let globalEnv: { [key: string]: string };
+let stack: StackClient;
 
 const client = createPublicClient({
 	chain: celo,
@@ -194,18 +198,34 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		const streamsByCollective = groupBy(result, 'collective.id');
 		// console.log({ streamsByCollective });
 		const streamed = Object.entries(streamsByCollective).map(([id, events]) => {
-			const prevStreams = events.reduce((acc, cur) => acc + BigInt(cur.contribution) - BigInt(cur.previousContribution), 0n);
+			const prevStreams = events.reduce((acc, cur, idx) => {
+				const streamDays = (cur.timestamp - (events?.[idx - 1]?.timestamp || 0)) / (60 * 60 * 24);
+				acc + ((BigInt(cur.contribution) - BigInt(cur.previousContribution)) * BigInt(streamDays)) / CAMPAIGN_DAYS;
+			}, 0n);
 			const lastStream = last(events);
 			let streaming = 0n;
 			if (BigInt(lastStream.flowRate) > 0) {
-				streaming = BigInt(lastStream.flowRate) * BigInt(Math.floor(Date.now() / 1000) - Number(lastStream.timestamp));
+				const streamSeconds = BigInt(Math.floor(Date.now() / 1000) - Number(lastStream.timestamp));
+				const streamDays = streamSeconds / (60n * 60n * 24n);
+				streaming = (BigInt(lastStream.flowRate) * streamSeconds * streamDays) / CAMPAIGN_DAYS;
 				// console.log({ lastStream, streaming });
 			}
 			return [id, prevStreams + streaming];
 		});
 		const totalStreamed = streamed.reduce((acc, cur) => acc + cur[1], 0n);
-		console.log({ address, streamed, totalStreamed });
-		return totalStreamed.toString();
+		const sqrdStreamed = Math.sqrt(Number(totalStreamed / BigInt(1e18)));
+		const streamedSoFar = Number(await stack.getPoints(address, { event: 'streamed' }));
+		console.log(
+			'fetched streams result:',
+			{ address, totalStreamed: totalStreamed.toString(), sqrdStreamed, streamedSoFar },
+			Object.keys(streamsByCollective)
+		);
+		const diff = sqrdStreamed - streamedSoFar;
+		if (diff > 0) {
+			console.log('updating stack streamed points', { address, diff, streamedSoFar });
+			await stack.track('streamed', { account: address, points: diff });
+		}
+		return sqrdStreamed.toString();
 	} catch (e: any) {
 		console.error('getGoodCollectiveStreams failed', e.message, e);
 		throw e;
@@ -226,7 +246,13 @@ const getClaims = async (address: string): Promise<string> => {
 			apikey: globalEnv.CELOSCAN_KEY,
 		};
 		const events = await getExplorerEvents(address, query);
-		console.log('fetched wallet claim events:', events.length, { query, address });
+		const claimsSoFar = Number(await stack.getPoints(address, { event: 'claimed' }));
+		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
+		const diff = events.length - claimsSoFar;
+		if (diff > 0) {
+			console.log('updating stack claimed points', { address, diff, claimsSoFar });
+			await stack.track('claimed', { account: address, points: diff });
+		}
 		return String(events.length);
 	} catch (e: any) {
 		console.error('fetchWalletData failed:', e.message, e);
@@ -252,20 +278,30 @@ export default {
 		globalEnv = env as any;
 		const clientIp = request.headers.get('CF-Connecting-IP');
 		let url = new URL(request.url);
-		const address = url.searchParams.get('address');
+		const address = getAddress(url.searchParams.get('address') as any);
 		console.log('incoming request:', address, clientIp);
 		if (!address) {
 			throw new Error('missing wallet address');
 		}
-		await verifyWhitelisted(address as any);
-		const [topWalletResult, walletData] = await Promise.all([topWallet(address, clientIp || ''), fetchWalletData(address)]);
-		console.log('results:', { address, clientIp, topWalletResult, walletData });
-		return new Response(
-			JSON.stringify({
-				topWalletResult,
-				walletData,
-			}),
-			{ headers: getHeaders(), status: 200 }
-		);
+		try {
+			stack = new StackClient({
+				// Your API key
+				apiKey: globalEnv.STACK_KEY,
+				pointSystemId: 7246,
+			});
+			await verifyWhitelisted(address as any);
+			const [topWalletResult, walletData] = await Promise.all([topWallet(address, clientIp || ''), fetchWalletData(address)]);
+			console.log('results:', { address, clientIp, topWalletResult, walletData });
+			return new Response(
+				JSON.stringify({
+					topWalletResult,
+					walletData,
+				}),
+				{ headers: getHeaders(), status: 200 }
+			);
+		} catch (e: any) {
+			console.log('failed data fetch', { address, error: e.message, e, globalEnv });
+			throw e;
+		}
 	},
 } satisfies ExportedHandler<Env>;
