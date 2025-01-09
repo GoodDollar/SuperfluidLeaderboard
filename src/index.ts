@@ -15,7 +15,8 @@ import { celo } from 'viem/chains';
 import { createPublicClient, getContract, http, padHex, parseAbi, getAddress } from 'viem';
 import { StackClient } from '@stackso/js-core';
 
-const CAMPAIGN_DAYS = 730n; //assuming two years airdrop campain
+const MAX_DAILY_STREAM = BigInt(73000 * 1e18); //73k G$
+const MAX_STREAM_RATE = MAX_DAILY_STREAM / (24n * 60n * 60n);
 
 let globalEnv: { [key: string]: string };
 let stack: StackClient;
@@ -153,7 +154,7 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 	const subgraphUrl = globalEnv.SUBGRAPH_URL;
 	const query = `
 	{
-    	supportEvents(where: {isFlowUpdate: true donor:"${address}"} orderBy:timestamp orderDirection:asc) {
+    	supportEvents(where: {isFlowUpdate: true donor:"${address.toLowerCase()}"} orderBy:timestamp orderDirection:asc) {
     		id  
 			timestamp
 			collective{
@@ -181,6 +182,7 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 				})
 					.then((result) => result.json())
 					.then((result: any) => {
+						console.log(result.data, subgraphUrl, address);
 						if (isArray(result.data.supportEvents)) {
 							return result.data.supportEvents;
 						}
@@ -193,27 +195,35 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 			{ n: 3, waitMillis: 1000 }
 		).promise;
 
-		// console.log('getGoodCollectiveStreams result:', result);
+		console.log('getGoodCollectiveStreams result:', result.length);
 
 		const streamsByCollective = groupBy(result, 'collective.id');
 		// console.log({ streamsByCollective });
-		const streamed = Object.entries(streamsByCollective).map(([id, events]) => {
-			const prevStreams = events.reduce((acc, cur, idx) => {
-				const streamDays = (cur.timestamp - (events?.[idx - 1]?.timestamp || 0)) / (60 * 60 * 24);
-				acc + ((BigInt(cur.contribution) - BigInt(cur.previousContribution)) * BigInt(streamDays)) / CAMPAIGN_DAYS;
-			}, 0n);
-			const lastStream = last(events);
-			let streaming = 0n;
-			if (BigInt(lastStream.flowRate) > 0) {
-				const streamSeconds = BigInt(Math.floor(Date.now() / 1000) - Number(lastStream.timestamp));
-				const streamDays = streamSeconds / (60n * 60n * 24n);
-				streaming = (BigInt(lastStream.flowRate) * streamSeconds * streamDays) / CAMPAIGN_DAYS;
-				// console.log({ lastStream, streaming });
-			}
-			return [id, prevStreams + streaming];
-		});
-		const totalStreamed = streamed.reduce((acc, cur) => acc + cur[1], 0n);
-		const sqrdStreamed = Math.sqrt(Number(totalStreamed / BigInt(1e18)));
+		const streams = Object.entries(streamsByCollective)
+			.map(([id, events]) => {
+				console.log('pool:', id, ' events:', events.length);
+				const streams = events
+					.map((cur, idx) => {
+						const streamSeconds = BigInt(cur.timestamp - (events?.[idx - 1]?.timestamp || 0));
+						const streamRate = (BigInt(cur.contribution) - BigInt(cur.previousContribution)) / streamSeconds;
+						return [streamRate, streamSeconds];
+					})
+					.filter((_) => _[0] > 0 && _[1] > 0);
+
+				const lastStream = last(events);
+				if (BigInt(lastStream?.flowRate) > 0) {
+					const streamSeconds = BigInt(Math.floor(Date.now() / 1000) - Number(lastStream.timestamp));
+					streams.push([BigInt(lastStream.flowRate), streamSeconds]);
+				}
+				return streams;
+			})
+			.flat();
+
+		const totalStreamed = streams.reduce((acc, cur) => acc + cur[0] * cur[1], 0n);
+		const totalStreamsSeconds = streams.reduce((acc, cur) => acc + cur[1], 0n);
+		let totalAvgFlowRate = totalStreamed > 0 ? totalStreamed / totalStreamsSeconds : 0n;
+		const maxTotalStreamed = totalAvgFlowRate > MAX_STREAM_RATE ? MAX_STREAM_RATE * totalStreamsSeconds : totalStreamed;
+		const sqrdStreamed = Number(Math.sqrt(Number(maxTotalStreamed / BigInt(1e18))).toFixed(0));
 		const streamedSoFar = Number(await stack.getPoints(address, { event: 'streamed' }));
 		console.log(
 			'fetched streams result:',
