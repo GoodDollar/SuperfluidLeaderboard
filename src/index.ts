@@ -97,7 +97,7 @@ export const fallback = async (asyncFns: any) => {
 const getHeaders = () => {
 	return new Headers([
 		['Content-Type', 'application/json'],
-		// ['Access-Control-Allow-Origin', '*'],
+		['Access-Control-Allow-Origin', '*'],
 		// ['Access-Control-Allow-Methods', 'GET, HEAD, POST, OPTIONS'],
 		// ['Access-Control-Allow-Headers', 'Content-Type, Authorization'],
 		// ['Access-Control-Allow-Credentials', 'true'],
@@ -232,8 +232,9 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		);
 		const diff = sqrdStreamed - streamedSoFar;
 		if (diff > 0) {
-			console.log('updating stack streamed points', { address, diff, streamedSoFar });
-			await stack.track('streamed', { account: address, points: diff });
+			const uniqueId = address + '_' + (last(result) as any).timestamp;
+			console.log('updating stack streamed points', { address, diff, streamedSoFar, uniqueId });
+			await stack.track('streamed', { account: address, points: diff, uniqueId });
 		}
 		return sqrdStreamed.toString();
 	} catch (e: any) {
@@ -260,8 +261,9 @@ const getClaims = async (address: string): Promise<string> => {
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
 		const diff = events.length - claimsSoFar;
 		if (diff > 0) {
-			console.log('updating stack claimed points', { address, diff, claimsSoFar });
-			await stack.track('claimed', { account: address, points: diff });
+			const uniqueId = address + '_' + last(events).timeStamp;
+			console.log('updating stack claimed points', { address, diff, claimsSoFar, uniqueId });
+			await stack.track('claimed', { account: address, points: diff, uniqueId });
 		}
 		return String(events.length);
 	} catch (e: any) {
@@ -274,13 +276,12 @@ const fetchWalletData = async (address: string): Promise<{ claims: string; strea
 	const [streamed, claims] = await Promise.all([getGoodCollectiveStreams(address), getClaims(address)]);
 	return { claims, streamed };
 };
-const verifyWhitelisted = async (address: `0x${string}`): Promise<void> => {
+const verifyWhitelisted = async (address: `0x${string}`): Promise<boolean> => {
 	const abi = parseAbi(['function getWhitelistedRoot(address) view returns (address)']);
 	const identity = getContract({ abi, address: globalEnv.IDENTITY as any, client });
 	const whitelistedRoot = await identity.read.getWhitelistedRoot([address]);
 
-	if (whitelistedRoot.toLowerCase() !== address.toLowerCase())
-		throw new Error(`not whitelisted or not original ${whitelistedRoot}!=${address}`);
+	return whitelistedRoot.toLowerCase() === address.toLowerCase();
 };
 export default {
 	async fetch(request, env, ctx): Promise<Response> {
@@ -299,7 +300,15 @@ export default {
 				apiKey: globalEnv.STACK_KEY,
 				pointSystemId: 7246,
 			});
-			await verifyWhitelisted(address as any);
+			const isWhitelisted = await verifyWhitelisted(address as any);
+			if (isWhitelisted === false) {
+				return new Response(
+					JSON.stringify({
+						error: 'not whitelisted',
+					}),
+					{ headers: getHeaders(), status: 200 }
+				);
+			}
 			const [topWalletResult, walletData] = await Promise.all([topWallet(address, clientIp || ''), fetchWalletData(address)]);
 			console.log('results:', { address, clientIp, topWalletResult, walletData });
 			return new Response(
