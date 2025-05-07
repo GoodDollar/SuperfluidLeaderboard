@@ -105,7 +105,7 @@ const getHeaders = () => {
 };
 
 export const getExplorerEvents = async (address: string, query: any): Promise<Array<any>> => {
-	const networkExplorerUrls = 'https://api.celoscan.io/api,https://explorer.celo.org/mainnet/api';
+	const networkExplorerUrls = 'https://api.celoscan.io/api,https://celo.blockscout.com/api';
 
 	const params = { module: 'logs', action: 'getLogs', address, sort: 'asc', page: 1, offset: 1000, ...query };
 
@@ -154,7 +154,7 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 	const subgraphUrl = globalEnv.SUBGRAPH_URL;
 	const query = `
 	{
-    	supportEvents(where: {isFlowUpdate: true donor:"${address.toLowerCase()}"} orderBy:timestamp orderDirection:asc) {
+    	supportEvents(where: {isFlowUpdate: true donor:"${address.toLowerCase()}"} orderBy:timestamp orderDirection:asc first:1000) {
     		id  
 			timestamp
 			collective{

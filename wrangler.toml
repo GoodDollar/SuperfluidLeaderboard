@@ -12,7 +12,7 @@ enabled = true
 
 [vars]
 IDENTITY = '0xC361A6E67822a0EDc17D899227dd9FC50BD62F42'
-FROM_BLOCK = 29000000
+FROM_BLOCK = 27300000
 GOODSERVER_URL = 'https://goodserver.gooddollar.org/verify/topwallet'
 #SUBGRAPH_URL = ''
 #CELOSCAN_KEY
