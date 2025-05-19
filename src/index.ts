@@ -105,7 +105,8 @@ const getHeaders = () => {
 };
 
 export const getExplorerEvents = async (address: string, query: any): Promise<Array<any>> => {
-	const networkExplorerUrls = 'https://api.celoscan.io/api,https://celo.blockscout.com/api';
+	const networkExplorerUrls =
+		'https://celo.blockscout.com/api?apikey=a7fdb805-066c-4018-a0e3-5141091a4555,https://api.etherscan.io/v2/api?chainid=42220&apikey=547B7DJFNDC6DZ9WII2S6AY1DX8IT7VAXU';
 
 	const params = { module: 'logs', action: 'getLogs', address, sort: 'asc', page: 1, offset: 1000, ...query };
 
@@ -124,7 +125,7 @@ export const getExplorerEvents = async (address: string, query: any): Promise<Ar
 					throw new Error(`NOTOK ${JSON.stringify(result)}`);
 				})
 				.catch((e) => {
-					console.error('getExplorerEvents fetch failed:', e.message, e, url.toString());
+					console.warn('getExplorerEvents fetch failed:', e.message, e, url.toString());
 					throw e;
 				});
 	});
@@ -140,8 +141,9 @@ const topWallet = async (address: string, clientIp: string) => {
 		});
 		if (response.status != 200) {
 			const error = await response.text();
-			console.warn('topWallet failed');
-			throw new Error(`topWallet failed: ${error}`);
+			console.error('topWallet failed', error);
+			return { ok: 0 };
+			// throw new Error(`topWallet failed: ${error}`);
 		}
 		const result = await response.json();
 		return result;
@@ -189,7 +191,7 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 						throw new Error(`NOTOK ${JSON.stringify(result)}`);
 					})
 					.catch((e) => {
-						console.error('getGoodCollectiveStreams fetch failed:', e.message, e);
+						console.warn('getGoodCollectiveStreams fetch failed:', e.message, e);
 						throw e;
 					}),
 			{ n: 3, waitMillis: 1000 }
@@ -234,7 +236,12 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		if (diff > 0) {
 			const uniqueId = address + '_' + (last(result) as any).timestamp;
 			console.log('updating stack streamed points', { address, diff, streamedSoFar, uniqueId });
-			await stack.track('streamed', { account: address, points: diff, uniqueId });
+			try {
+				await stack.track('streamed', { account: address, points: diff, uniqueId });
+			} catch (e: any) {
+				console.error('stack.so track failed (streamed):', e.message, e);
+				throw e;
+			}
 		}
 		return sqrdStreamed.toString();
 	} catch (e: any) {
@@ -263,11 +270,16 @@ const getClaims = async (address: string): Promise<string> => {
 		if (diff > 0) {
 			const uniqueId = address + '_' + last(events).timeStamp;
 			console.log('updating stack claimed points', { address, diff, claimsSoFar, uniqueId });
-			await stack.track('claimed', { account: address, points: diff, uniqueId });
+			try {
+				await stack.track('claimed', { account: address, points: diff, uniqueId });
+			} catch (e: any) {
+				console.error('stack.so track failed (claimed):', e.message, e);
+				throw e;
+			}
 		}
 		return String(events.length);
 	} catch (e: any) {
-		console.error('fetchWalletData failed:', e.message, e);
+		console.error('getClaims failed:', e.message, e);
 		throw e;
 	}
 };
@@ -319,7 +331,7 @@ export default {
 				{ headers: getHeaders(), status: 200 }
 			);
 		} catch (e: any) {
-			console.log('failed data fetch', { address, error: e.message, e, globalEnv });
+			console.error('superfluid request failed', { address, error: e.message, e, globalEnv });
 			throw e;
 		}
 	},
