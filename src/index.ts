@@ -21,11 +21,6 @@ const MAX_STREAM_RATE = MAX_DAILY_STREAM / (24n * 60n * 60n);
 let globalEnv: { [key: string]: string };
 let stack: StackClient;
 
-const client = createPublicClient({
-	chain: celo,
-	transport: http(),
-});
-
 function wait(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -105,10 +100,18 @@ const getHeaders = () => {
 };
 
 export const getExplorerEvents = async (address: string, query: any): Promise<Array<any>> => {
-	const networkExplorerUrls =
-		'https://celo.blockscout.com/api?apikey=a7fdb805-066c-4018-a0e3-5141091a4555,https://api.etherscan.io/v2/api?chainid=42220&apikey=547B7DJFNDC6DZ9WII2S6AY1DX8IT7VAXU';
+	const networkExplorerUrls = 'https://celo.blockscout.com/api,https://api.etherscan.io/v2/api?chainid=42220';
 
-	const params = { module: 'logs', action: 'getLogs', address, sort: 'asc', page: 1, offset: 1000, ...query };
+	const params = {
+		module: 'logs',
+		action: 'getLogs',
+		address,
+		sort: 'asc',
+		page: 1,
+		offset: 1000,
+		...query,
+		apikey: globalEnv.CELOSCAN_KEY,
+	};
 
 	const calls = networkExplorerUrls.split(',').map((networkExplorerUrl) => {
 		const url = new URL(networkExplorerUrl);
@@ -122,6 +125,7 @@ export const getExplorerEvents = async (address: string, query: any): Promise<Ar
 					if (isArray(result.result)) {
 						return result.result;
 					}
+					console.warn('getExplorerEvents fetch failed:', result);
 					throw new Error(`NOTOK ${JSON.stringify(result)}`);
 				})
 				.catch((e) => {
@@ -156,7 +160,9 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 	const subgraphUrl = globalEnv.SUBGRAPH_URL;
 	const query = `
 	{
-    	supportEvents(where: {isFlowUpdate: true donor:"${address.toLowerCase()}"} orderBy:timestamp orderDirection:asc first:1000) {
+    	supportEvents(where: {timestamp_gte: ${
+				globalEnv.FROM_TS
+			} isFlowUpdate: true donor:"${address.toLowerCase()}"} orderBy:timestamp orderDirection:asc first:1000) {
     		id  
 			timestamp
 			collective{
@@ -198,6 +204,9 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		).promise;
 
 		console.log('getGoodCollectiveStreams result:', result.length);
+		if (result.length === 0) {
+			return '0';
+		}
 
 		const streamsByCollective = groupBy(result, 'collective.id');
 		// console.log({ streamsByCollective });
@@ -250,9 +259,45 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 	}
 };
 
+export const getInviteEvents = async (address: string): Promise<string> => {
+	try {
+		const toBlock = 'latest';
+		const query = {
+			address: '0x36829D1Cda92FFF5782d5d48991620664FC857d3', //invites on celo
+			topic0: '0xd8c638d8979e2ba5dba1f0d66246ee4b1c54b838f0e0a2b601365345eb23b051', //invite event topic
+			topic0_1_opr: 'and',
+			topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+			fromBlock: globalEnv.FROM_BLOCK_INVITES || 20506082,
+			toBlock,
+			offset: 1000,
+		};
+		const events = await getExplorerEvents(address, query);
+		if (events.length === 0) {
+			return '0';
+		}
+		const invitesSoFar = Number(await stack.getPoints(address, { event: 'invite' }));
+		console.log('fetched wallet invite events:', { events: events.length, address, invitesSoFar });
+		const diff = events.length - invitesSoFar;
+		if (diff > 0) {
+			const uniqueId = address + '_' + last(events).timeStamp;
+			console.log('updating stack invites points', { address, diff, invitesSoFar, uniqueId });
+			try {
+				await stack.track('invites', { account: address, points: diff, uniqueId });
+			} catch (e: any) {
+				console.error('stack.so track failed (invites):', e.message, e);
+				throw e;
+			}
+		}
+		return String(events.length);
+	} catch (e: any) {
+		console.error('getInvites failed:', e.message, e);
+		throw e;
+	}
+};
+
 const getClaims = async (address: string): Promise<string> => {
 	try {
-		const toBlock = await client.getBlockNumber();
+		const toBlock = 'latest';
 		const query = {
 			address: '0x43d72Ff17701B2DA814620735C39C620Ce0ea4A1', //ubischeme on celo
 			topic0: '0x89ed24731df6b066e4c5186901fffdba18cd9a10f07494aff900bdee260d1304', //claim event topic
@@ -261,9 +306,11 @@ const getClaims = async (address: string): Promise<string> => {
 			fromBlock: globalEnv.FROM_BLOCK || 20506082,
 			toBlock,
 			offset: 1000,
-			apikey: globalEnv.CELOSCAN_KEY,
 		};
 		const events = await getExplorerEvents(address, query);
+		if (events.length === 0) {
+			return '0';
+		}
 		const claimsSoFar = Number(await stack.getPoints(address, { event: 'claimed' }));
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
 		const diff = events.length - claimsSoFar;
@@ -284,11 +331,15 @@ const getClaims = async (address: string): Promise<string> => {
 	}
 };
 
-const fetchWalletData = async (address: string): Promise<{ claims: string; streamed: string }> => {
-	const [streamed, claims] = await Promise.all([getGoodCollectiveStreams(address), getClaims(address)]);
-	return { claims, streamed };
+const fetchWalletData = async (address: string): Promise<{ claims: string; streamed: string; invites: string }> => {
+	const [streamed, claims, invites] = await Promise.all([getGoodCollectiveStreams(address), getClaims(address), getInviteEvents(address)]);
+	return { claims, streamed, invites };
 };
 const verifyWhitelisted = async (address: `0x${string}`): Promise<boolean> => {
+	const client = createPublicClient({
+		chain: celo,
+		transport: http(globalEnv.CELO_RPC),
+	});
 	const abi = parseAbi(['function getWhitelistedRoot(address) view returns (address)']);
 	const identity = getContract({ abi, address: globalEnv.IDENTITY as any, client });
 	const whitelistedRoot = await identity.read.getWhitelistedRoot([address]);

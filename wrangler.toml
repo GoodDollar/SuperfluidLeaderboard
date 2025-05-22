@@ -12,8 +12,11 @@ enabled = true
 
 [vars]
 IDENTITY = '0xC361A6E67822a0EDc17D899227dd9FC50BD62F42'
-FROM_BLOCK = 27300000
 GOODSERVER_URL = 'https://goodserver.gooddollar.org/verify/topwallet'
+# season 2 params
+FROM_BLOCK = 34155000
+FROM_BLOCK_INVITES = 35960000
+FROM_TS = 1747872000
 #SUBGRAPH_URL = ''
 #CELOSCAN_KEY
 
