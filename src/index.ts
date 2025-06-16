@@ -118,8 +118,9 @@ export const getExplorerEvents = async (address: string, query: any): Promise<Ar
 		Object.entries(params).forEach(([k, v]) => {
 			url.searchParams.set(k, v as string);
 		});
-		return () =>
-			fetch(url)
+		const urlString = url.toString();
+		return () => {
+			return fetch(urlString)
 				.then((result) => result.json())
 				.then((result: any) => {
 					if (isArray(result.result)) {
@@ -129,9 +130,10 @@ export const getExplorerEvents = async (address: string, query: any): Promise<Ar
 					throw new Error(`NOTOK ${JSON.stringify(result)}`);
 				})
 				.catch((e) => {
-					console.warn('getExplorerEvents fetch failed:', e.message, e, url.toString());
+					console.warn('getExplorerEvents fetch failed:', e.message, e, urlString);
 					throw e;
 				});
+		};
 	});
 	return retry(() => fallback(calls) as any, { n: 3, waitMillis: 500 }).promise as any;
 };
@@ -311,7 +313,13 @@ const getClaims = async (address: string): Promise<string> => {
 		if (events.length === 0) {
 			return '0';
 		}
-		const claimsSoFar = Number(await stack.getPoints(address, { event: 'claimed' }));
+		console.log('got claims	 events:', { address, events: events.length });
+		const claimsSoFar = Number(
+			await stack.getPoints(address, { event: 'claimed' }).catch((e) => {
+				console.error('stack.so getPoints failed (claimed):', e.message, e);
+				throw e;
+			})
+		);
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
 		const diff = events.length - claimsSoFar;
 		if (diff > 0) {
