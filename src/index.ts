@@ -277,7 +277,7 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 		}
 		const invitesSoFar = Number(await stack.getPoints(address, { event: 'invite' }));
 		console.log('fetched wallet invite events:', { events: events.length, address, invitesSoFar });
-		const diff = events.length - invitesSoFar;
+		const diff = 5 * events.length - invitesSoFar; // 5 points per invite
 		if (diff > 0) {
 			const uniqueId = address + '_' + last(events).timeStamp;
 			console.log('updating stack invites points', { address, diff, invitesSoFar, uniqueId });
@@ -318,7 +318,8 @@ const getClaims = async (address: string): Promise<string> => {
 			const uniqueId = address + '_' + last(events).timeStamp;
 			console.log('updating stack claimed points', { address, diff, claimsSoFar, uniqueId });
 			try {
-				await stack.track('claimed', { account: address, points: diff, uniqueId });
+				const result = await stack.track('claimed', { account: address, points: diff, uniqueId });
+				console.log('stack.so track result:', result);
 			} catch (e: any) {
 				console.error('stack.so track failed (claimed):', e.message, e);
 				throw e;
@@ -326,7 +327,7 @@ const getClaims = async (address: string): Promise<string> => {
 		}
 		return String(events.length);
 	} catch (e: any) {
-		console.error('getClaims failed:', e.message, e);
+		console.error('getClaims failed:' + e.message, e.message, e);
 		throw e;
 	}
 };
@@ -361,7 +362,7 @@ export default {
 			stack = new StackClient({
 				// Your API key
 				apiKey: globalEnv.STACK_KEY,
-				pointSystemId: 7246,
+				pointSystemId: 7702,
 			});
 			const isWhitelisted = await verifyWhitelisted(address as any);
 			if (isWhitelisted === false) {
