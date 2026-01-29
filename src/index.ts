@@ -10,6 +10,14 @@
  *
  * Learn more at https://developers.cloudflare.com/workers/
  */
+
+/**
+ * Points:
+ * 5 per invite
+ * 1 per claim
+ * sqrt(total streamed to goodcollective max 73K per day)
+ * Before starting a new campaign update the variables for starting block and timestamp
+ */
 import { isArray, first, isFunction, noop, groupBy, last, add } from 'lodash';
 import { celo } from 'viem/chains';
 import { createPublicClient, getContract, http, padHex, parseAbi, getAddress } from 'viem';
@@ -206,9 +214,9 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		).promise;
 
 		console.log('getGoodCollectiveStreams result:', result.length);
-		if (result.length === 0) {
-			return '0';
-		}
+		// if (result.length === 0) {
+		// 	return '0';
+		// }
 
 		const streamsByCollective = groupBy(result, 'collective.id');
 		// console.log({ streamsByCollective });
@@ -244,11 +252,11 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 			Object.keys(streamsByCollective)
 		);
 		const diff = sqrdStreamed - streamedSoFar;
-		if (diff > 0) {
-			const uniqueId = address + '_' + (last(result) as any).timestamp;
-			console.log('updating stack streamed points', { address, diff, streamedSoFar, uniqueId });
+		if (diff !== 0) {
+			// const uniqueId = address + '_' + ((last(result) || {}) as any).timestamp + '_' + diff;
+			console.log('updating stack streamed points', { address, diff, streamedSoFar });
 			try {
-				await stack.track('streamed', { account: address, points: diff, uniqueId });
+				await stack.track('streamed', { account: address, points: diff });
 			} catch (e: any) {
 				console.error('stack.so track failed (streamed):', e.message, e);
 				throw e;
@@ -274,17 +282,22 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 			offset: 1000,
 		};
 		const events = await getExplorerEvents(address, query);
-		if (events.length === 0) {
-			return '0';
+		// if (events.length === 0) {
+		// 	return '0';
+		// }
+		const invitesSoFar = Number(await stack.getPoints(address, { event: 'validInvites' }));
+		const bugToReset = Number(await stack.getPoints(address, { event: 'invites' }));
+		if (bugToReset > 0) {
+			console.log('reset wrong invites bug:', { bugToReset, address });
+			await stack.track('invites', { account: address, points: -1 * bugToReset });
 		}
-		const invitesSoFar = Number(await stack.getPoints(address, { event: 'invite' }));
 		console.log('fetched wallet invite events:', { events: events.length, address, invitesSoFar });
 		const diff = 5 * events.length - invitesSoFar; // 5 points per invite
-		if (diff > 0) {
-			const uniqueId = address + '_' + last(events).timeStamp;
-			console.log('updating stack invites points', { address, diff, invitesSoFar, uniqueId });
+		if (diff !== 0) {
+			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
+			console.log('updating stack invites points', { address, diff, invitesSoFar });
 			try {
-				await stack.track('invites', { account: address, points: diff, uniqueId });
+				await stack.track('validInvites', { account: address, points: diff });
 			} catch (e: any) {
 				console.error('stack.so track failed (invites):', e.message, e);
 				throw e;
@@ -310,9 +323,9 @@ const getClaims = async (address: string): Promise<string> => {
 			offset: 1000,
 		};
 		const events = await getExplorerEvents(address, query);
-		if (events.length === 0) {
-			return '0';
-		}
+		// if (events.length === 0) {
+		// 	return '0';
+		// }
 		console.log('got claims	 events:', { address, events: events.length });
 		const claimsSoFar = Number(
 			await stack.getPoints(address, { event: 'claimed' }).catch((e) => {
@@ -322,11 +335,11 @@ const getClaims = async (address: string): Promise<string> => {
 		);
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
 		const diff = events.length - claimsSoFar;
-		if (diff > 0) {
-			const uniqueId = address + '_' + last(events).timeStamp;
-			console.log('updating stack claimed points', { address, diff, claimsSoFar, uniqueId });
+		if (diff !== 0) {
+			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
+			console.log('updating stack claimed points', { address, diff, claimsSoFar });
 			try {
-				const result = await stack.track('claimed', { account: address, points: diff, uniqueId });
+				const result = await stack.track('claimed', { account: address, points: diff });
 				console.log('stack.so track result:', result);
 			} catch (e: any) {
 				console.error('stack.so track failed (claimed):', e.message, e);
@@ -370,7 +383,7 @@ export default {
 			stack = new StackClient({
 				// Your API key
 				apiKey: globalEnv.STACK_KEY,
-				pointSystemId: 7702,
+				pointSystemId: Number(globalEnv.STACK_POINT_SYSTEM_ID),
 			});
 			const isWhitelisted = await verifyWhitelisted(address as any);
 			if (isWhitelisted === false) {
