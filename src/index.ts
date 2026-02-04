@@ -21,13 +21,16 @@
 import { isArray, first, isFunction, noop, groupBy, last, add } from 'lodash';
 import { celo } from 'viem/chains';
 import { createPublicClient, getContract, http, padHex, parseAbi, getAddress } from 'viem';
-import { StackClient } from '@stackso/js-core';
+import createClient from 'openapi-fetch';
+import { paths } from '../points-api';
 
 const MAX_DAILY_STREAM = BigInt(73000 * 1e18); //73k G$
 const MAX_STREAM_RATE = MAX_DAILY_STREAM / (24n * 60n * 60n);
 
 let globalEnv: { [key: string]: string };
-let stack: StackClient;
+
+const pointsClient = createClient<paths>({ baseUrl: 'https://cms.superfluid.pro' });
+// API key passed per-request for push operations
 
 function wait(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -194,14 +197,14 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		const result = await retry(
 			() =>
 				fetch(subgraphUrl, {
-					headers: { 'content-type': 'application/json' },
+					headers: { 'content-type': 'application/json', Authorization: `Bearer ${globalEnv.SUBGRAPH_KEY}` },
 					method: 'POST',
 					body: JSON.stringify({ query }),
 				})
 					.then((result) => result.json())
 					.then((result: any) => {
-						console.log(result.data, subgraphUrl, address);
-						if (isArray(result.data.supportEvents)) {
+						console.log('getGoodCollectiveStreams result:', result, subgraphUrl, address);
+						if (isArray(result.data?.supportEvents)) {
 							return result.data.supportEvents;
 						}
 						throw new Error(`NOTOK ${JSON.stringify(result)}`);
@@ -245,7 +248,11 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		let totalAvgFlowRate = totalStreamed > 0 ? totalStreamed / totalStreamsSeconds : 0n;
 		const maxTotalStreamed = totalAvgFlowRate > MAX_STREAM_RATE ? MAX_STREAM_RATE * totalStreamsSeconds : totalStreamed;
 		const sqrdStreamed = Number(Math.sqrt(Number(maxTotalStreamed / BigInt(1e18))).toFixed(0));
-		const streamedSoFar = Number(await stack.getPoints(address, { event: 'streamed' }));
+		// const streamedSoFar = Number(await stack.getPoints(address, { event: 'streamed' }));
+		const { data } = await pointsClient.GET('/points/event-balance', {
+			params: { query: { campaignId: Number(globalEnv.STACK_POINT_SYSTEM_ID), account: address, eventName: 'streamed' } },
+		});
+		const streamedSoFar = Number(data?.points || 0);
 		console.log(
 			'fetched streams result:',
 			{ address, totalStreamed: totalStreamed.toString(), sqrdStreamed, streamedSoFar },
@@ -256,7 +263,16 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 			// const uniqueId = address + '_' + ((last(result) || {}) as any).timestamp + '_' + diff;
 			console.log('updating stack streamed points', { address, diff, streamedSoFar });
 			try {
-				await stack.track('streamed', { account: address, points: diff });
+				await pointsClient.POST('/points/push', {
+					headers: { 'X-API-Key': globalEnv.STACK_KEY },
+					body: {
+						campaign: Number(globalEnv.STACK_POINT_SYSTEM_ID), // recommended
+						eventName: 'streamed',
+						account: address,
+						points: diff,
+					},
+				});
+				// await stack.track('streamed', { account: address, points: diff });
 			} catch (e: any) {
 				console.error('stack.so track failed (streamed):', e.message, e);
 				throw e;
@@ -285,19 +301,28 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 		// if (events.length === 0) {
 		// 	return '0';
 		// }
-		const invitesSoFar = Number(await stack.getPoints(address, { event: 'validInvites' }));
-		const bugToReset = Number(await stack.getPoints(address, { event: 'invites' }));
-		if (bugToReset > 0) {
-			console.log('reset wrong invites bug:', { bugToReset, address });
-			await stack.track('invites', { account: address, points: -1 * bugToReset });
-		}
+		// const invitesSoFar = Number(await pointsClient.getPoints(address, { event: 'validInvites' }));
+		const { data } = await pointsClient.GET('/points/event-balance', {
+			params: { query: { campaignId: Number(globalEnv.STACK_POINT_SYSTEM_ID), account: address, eventName: 'validInvites' } },
+		});
+
+		const invitesSoFar = Number(data?.points || 0);
 		console.log('fetched wallet invite events:', { events: events.length, address, invitesSoFar });
 		const diff = 5 * events.length - invitesSoFar; // 5 points per invite
 		if (diff !== 0) {
 			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
 			console.log('updating stack invites points', { address, diff, invitesSoFar });
 			try {
-				await stack.track('validInvites', { account: address, points: diff });
+				await pointsClient.POST('/points/push', {
+					headers: { 'X-API-Key': globalEnv.STACK_KEY },
+					body: {
+						campaign: Number(globalEnv.STACK_POINT_SYSTEM_ID), // recommended
+						eventName: 'validInvites',
+						account: address,
+						points: diff,
+					},
+				});
+				// await stack.track('validInvites', { account: address, points: diff });
 			} catch (e: any) {
 				console.error('stack.so track failed (invites):', e.message, e);
 				throw e;
@@ -327,20 +352,38 @@ const getClaims = async (address: string): Promise<string> => {
 		// 	return '0';
 		// }
 		console.log('got claims	 events:', { address, events: events.length });
-		const claimsSoFar = Number(
-			await stack.getPoints(address, { event: 'claimed' }).catch((e) => {
-				console.error('stack.so getPoints failed (claimed):', e.message, e);
-				throw e;
-			})
-		);
+		// const claimsSoFar = Number(
+		// 	await stack.getPoints(address, { event: 'claimed' }).catch((e) => {
+		// 		console.error('stack.so getPoints failed (claimed):', e.message, e);
+		// 		throw e;
+		// 	})
+		// );
+		const { data } = await pointsClient.GET('/points/event-balance', {
+			params: { query: { campaignId: Number(globalEnv.STACK_POINT_SYSTEM_ID), account: address, eventName: 'claimed' } },
+		});
+
+		const claimsSoFar = Number(data?.points || 0);
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
 		const diff = events.length - claimsSoFar;
 		if (diff !== 0) {
 			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
 			console.log('updating stack claimed points', { address, diff, claimsSoFar });
 			try {
-				const result = await stack.track('claimed', { account: address, points: diff });
-				console.log('stack.so track result:', result);
+				// const result = await stack.track('claimed', { account: address, points: diff });
+				const result = await pointsClient.POST('/points/push', {
+					headers: { 'X-API-Key': globalEnv.STACK_KEY },
+					body: {
+						campaign: Number(globalEnv.STACK_POINT_SYSTEM_ID), // recommended
+						eventName: 'claimed',
+						account: address,
+						points: diff,
+					},
+				});
+				// .then((_) => _.data);
+				console.log('stack.so track result:', result.data || result.error);
+				if (result.error) {
+					throw new Error('stack.so track failed (claimed):' + JSON.stringify(result.error));
+				}
 			} catch (e: any) {
 				console.error('stack.so track failed (claimed):', e.message, e);
 				throw e;
@@ -380,11 +423,11 @@ export default {
 			throw new Error('missing wallet address');
 		}
 		try {
-			stack = new StackClient({
-				// Your API key
-				apiKey: globalEnv.STACK_KEY,
-				pointSystemId: Number(globalEnv.STACK_POINT_SYSTEM_ID),
-			});
+			// stack = new StackClient({
+			// 	// Your API key
+			// 	apiKey: globalEnv.STACK_KEY,
+			// 	pointSystemId: Number(globalEnv.STACK_POINT_SYSTEM_ID),
+			// });
 			const isWhitelisted = await verifyWhitelisted(address as any);
 			if (isWhitelisted === false) {
 				return new Response(
