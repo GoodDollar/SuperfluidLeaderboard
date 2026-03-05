@@ -396,9 +396,9 @@ const getClaims = async (address: string): Promise<string> => {
 	}
 };
 
-const fetchWalletData = async (address: string): Promise<{ claims: string; streamed: string; invites: string }> => {
-	const [streamed, claims, invites] = await Promise.all([getGoodCollectiveStreams(address), getClaims(address), getInviteEvents(address)]);
-	return { claims, streamed, invites };
+const fetchWalletData = async (address: string): Promise<{ claims: string; invites: string }> => {
+	const [claims, invites] = await Promise.all([getClaims(address), getInviteEvents(address)]);
+	return { claims, invites };
 };
 const verifyWhitelisted = async (address: `0x${string}`): Promise<boolean> => {
 	const client = createPublicClient({
