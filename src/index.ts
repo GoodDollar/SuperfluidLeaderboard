@@ -290,7 +290,7 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 		const toBlock = 'latest';
 		const query = {
 			address: '0x36829D1Cda92FFF5782d5d48991620664FC857d3', //invites on celo
-			topic0: '0xd8c638d8979e2ba5dba1f0d66246ee4b1c54b838f0e0a2b601365345eb23b051', //invite event topic
+			topic0: '0x6081787cd1bd02ab1576c52f03e8710d792d460e7881c3155d77d23893f3768b', //invite event topic
 			topic0_1_opr: 'and',
 			topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
 			fromBlock: globalEnv.FROM_BLOCK_INVITES || 20506082,
