@@ -116,8 +116,21 @@ const getHeaders = () => {
 	]);
 };
 
+const parseReceivers = (value: string | undefined): string[] => {
+	if (!value) {
+		return [];
+	}
+
+	const receivers = value
+		.split(',')
+		.map((receiver) => receiver.trim().toLowerCase())
+		.filter((receiver) => receiver.length > 0);
+
+	return [...new Set(receivers)];
+};
+
 export const getExplorerEvents = async (address: string, query: any): Promise<Array<any>> => {
-	const networkExplorerUrls = 'https://celo.blockscout.com/api,https://api.etherscan.io/v2/api?chainid=42220';
+	const networkExplorerUrls = 'https://celo.blockscout.com/api';
 
 	const params = {
 		module: 'logs',
@@ -207,32 +220,32 @@ const getEventBalance = async (address: string, eventName: string): Promise<numb
 	return Number(data?.points || 0);
 };
 
-const getStreamedToReceiverPoints = async ({
+const getStreamedToReceiverWei = async ({
 	address,
-	receiver,
+	receivers,
 	token,
-	pointsPerGdFloat,
-	eventName,
 	logPrefix,
 }: {
 	address: string;
-	receiver: string;
+	receivers: string[];
 	token: string;
-	pointsPerGdFloat: number;
-	eventName: string;
 	logPrefix: string;
-}): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
+}): Promise<bigint> => {
 	const sender = address.toLowerCase();
+	const normalizedReceivers = [...new Set(receivers.map((receiver) => receiver.toLowerCase()))];
+	if (normalizedReceivers.length === 0) {
+		return 0n;
+	}
 	const query = `
 	query CFAStreamsQuery(
-	  $receiver: String!
+	  $receivers: [String!]!
 	  $sender: String!
 	  $token: String!
 	  $first: Int!
 	  $skip: Int!
 	) {
 	  streams(
-		where: { sender: $sender, receiver: $receiver, token: $token }
+		where: { sender: $sender, receiver_in: $receivers, token: $token }
 		first: $first
 		skip: $skip
 	  ) {
@@ -257,7 +270,7 @@ const getStreamedToReceiverPoints = async ({
 					body: JSON.stringify({
 						query,
 						variables: {
-							receiver,
+							receivers: normalizedReceivers,
 							sender,
 							token,
 							first: ROUND_STREAMS_PAGE_SIZE,
@@ -291,6 +304,31 @@ const getStreamedToReceiverPoints = async ({
 		skip += ROUND_STREAMS_PAGE_SIZE;
 	}
 
+	return totalStreamedWei;
+};
+
+const getStreamedToReceiverPoints = async ({
+	address,
+	receiver,
+	token,
+	pointsPerGdFloat,
+	eventName,
+	logPrefix,
+}: {
+	address: string;
+	receiver: string;
+	token: string;
+	pointsPerGdFloat: number;
+	eventName: string;
+	logPrefix: string;
+}): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
+	const totalStreamedWei = await getStreamedToReceiverWei({
+		address,
+		receivers: [receiver],
+		token,
+		logPrefix,
+	});
+
 	const totalStreamedGd = formatEther(totalStreamedWei);
 	const totalPoints = Math.floor(parseFloat(totalStreamedGd) * pointsPerGdFloat);
 	const awardedSoFar = await getEventBalance(address, eventName);
@@ -316,11 +354,11 @@ const getStreamedToReceiverPoints = async ({
 const getRoundSplitterStreamPoints = async (address: string): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
 	try {
 		const receiver = globalEnv.ROUND_SPLITTER?.toLowerCase();
-		const token = globalEnv.ROUND_GD_SUPER_TOKEN?.toLowerCase();
+		const token = globalEnv.GOODDOLLAR?.toLowerCase();
 		const pointsPerGdFloat = parseFloat(globalEnv.ROUND_POINTS_PER_GD || '0');
 
 		if (!receiver || !token) {
-			console.warn('ROUND_SPLITTER or ROUND_GD_SUPER_TOKEN missing, skipping round streamed points', {
+			console.warn('ROUND_SPLITTER or GOODDOLLAR missing, skipping round streamed points', {
 				address,
 				receiver,
 				token,
@@ -344,27 +382,47 @@ const getRoundSplitterStreamPoints = async (address: string): Promise<{ totalStr
 
 const getOpenSourcePoolStreamPoints = async (address: string): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
 	try {
-		const receiver = globalEnv.OPENSOURCE_POOL?.toLowerCase();
-		const token = globalEnv.OPENSOURCE_GD_SUPER_TOKEN?.toLowerCase();
+		const receivers = parseReceivers(globalEnv.OPENSOURCE_POOLS);
+		const token = globalEnv.GOODDOLLAR?.toLowerCase();
 		const pointsPerGdFloat = parseFloat(globalEnv.OPENSOURCE_STREAM_POINTS_PER_GD || '0');
 
-		if (!receiver || !token) {
-			console.warn('OPENSOURCE_POOL or OPENSOURCE_GD_SUPER_TOKEN missing, skipping opensource pool streamed points', {
+		if (receivers.length === 0 || !token) {
+			console.warn('OPENSOURCE_POOLS or GOODDOLLAR missing, skipping opensource pool streamed points', {
 				address,
-				receiver,
+				receivers,
 				token,
 			});
 			return { totalStreamedGd: '0', awardedPoints: '0' };
 		}
 
-		return getStreamedToReceiverPoints({
+		const totalStreamedWei = await getStreamedToReceiverWei({
 			address,
-			receiver,
+			receivers,
 			token,
-			pointsPerGdFloat,
-			eventName: OPENSOURCE_STREAM_EVENT_NAME,
 			logPrefix: 'getOpenSourcePoolStreamPoints',
 		});
+
+		const totalStreamedGd = formatEther(totalStreamedWei);
+		const totalPoints = Math.floor(parseFloat(totalStreamedGd) * pointsPerGdFloat);
+		const awardedSoFar = await getEventBalance(address, OPENSOURCE_STREAM_EVENT_NAME);
+		const diff = totalPoints - awardedSoFar;
+
+		if (diff !== 0) {
+			console.log('updating opensource streamed points', {
+				address,
+				receivers,
+				totalStreamedWei: totalStreamedWei.toString(),
+				totalPoints,
+				awardedSoFar,
+				diff,
+			});
+			await pushPointsDelta({ address, eventName: OPENSOURCE_STREAM_EVENT_NAME, points: diff });
+		}
+
+		return {
+			totalStreamedGd,
+			awardedPoints: String(totalPoints),
+		};
 	} catch (e: any) {
 		console.error('getOpenSourcePoolStreamPoints failed', e.message, e);
 		throw e;
@@ -373,31 +431,35 @@ const getOpenSourcePoolStreamPoints = async (address: string): Promise<{ totalSt
 
 const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: string; awardedPoints: string }> => {
 	try {
-		const tokenAddress = globalEnv.OPENSOURCE_GD_TOKEN;
-		const receiver = globalEnv.OPENSOURCE_POOL;
+		const tokenAddress = globalEnv.GOODDOLLAR;
+		const receivers = parseReceivers(globalEnv.OPENSOURCE_POOLS);
 		const pointsPerGdFloat = parseFloat(globalEnv.OPENSOURCE_SENT_POINTS_PER_GD || '0');
-		if (!tokenAddress || !receiver) {
-			console.warn('OPENSOURCE_GD_TOKEN or OPENSOURCE_POOL missing, skipping opensource sent points', {
+		if (!tokenAddress || receivers.length === 0) {
+			console.warn('GOODDOLLAR or OPENSOURCE_POOLS missing, skipping opensource sent points', {
 				address,
 				tokenAddress,
-				receiver,
+				receivers,
 			});
 			return { totalSentGd: '0', awardedPoints: '0' };
 		}
 
-		const query = {
-			address: tokenAddress,
-			topic0: ERC20_TRANSFER_TOPIC,
-			topic0_1_opr: 'and',
-			topic1_2_opr: 'and',
-			topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
-			topic2: padHex(receiver as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
-			fromBlock: globalEnv.FROM_BLOCK || 20506082,
-			toBlock: 'latest',
-			offset: 1000,
-		};
-		const events = await getExplorerEvents(tokenAddress, query);
-		const totalSentWei = events.reduce((acc, cur) => acc + BigInt(cur.data || '0x0'), 0n);
+		let totalSentWei = 0n;
+		for (const receiver of receivers) {
+			const query = {
+				address: tokenAddress,
+				topic0: ERC20_TRANSFER_TOPIC,
+				topic0_1_opr: 'and',
+				topic0_2_opr: 'and',
+				topic1_2_opr: 'and',
+				topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+				topic2: padHex(receiver as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+				fromBlock: globalEnv.FROM_BLOCK || 20506082,
+				toBlock: 'latest',
+				offset: 1000,
+			};
+			const events = await getExplorerEvents(tokenAddress, query);
+			totalSentWei += events.reduce((acc, cur) => acc + BigInt(cur.data || '0x0'), 0n);
+		}
 		const totalSentGd = formatEther(totalSentWei);
 		const totalPoints = Math.floor(parseFloat(totalSentGd) * pointsPerGdFloat);
 		const awardedSoFar = await getEventBalance(address, OPENSOURCE_SENT_EVENT_NAME);
@@ -406,6 +468,7 @@ const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: 
 		if (diff !== 0) {
 			console.log('updating opensource sent points', {
 				address,
+				receivers,
 				totalSentWei: totalSentWei.toString(),
 				totalPoints,
 				awardedSoFar,
@@ -545,7 +608,7 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 		// const invitesSoFar = Number(await pointsClient.getPoints(address, { event: 'validInvites' }));
 		const invitesSoFar = await getEventBalance(address, 'validInvites');
 		console.log('fetched wallet invite events:', { events: events.length, address, invitesSoFar });
-		const diff = 5 * events.length - invitesSoFar; // 5 points per invite
+		const diff = Number(globalEnv.INVITE_POINTS || 0) * events.length - invitesSoFar; // 5 points per invite
 		if (diff !== 0) {
 			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
 			console.log('updating stack invites points', { address, diff, invitesSoFar });
@@ -589,7 +652,7 @@ const getClaims = async (address: string): Promise<string> => {
 		// );
 		const claimsSoFar = await getEventBalance(address, 'claimed');
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
-		const diff = events.length - claimsSoFar;
+		const diff = events.length * Number(globalEnv.CLAIM_POINTS || 0) - claimsSoFar;
 		if (diff !== 0) {
 			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
 			console.log('updating stack claimed points', { address, diff, claimsSoFar });
