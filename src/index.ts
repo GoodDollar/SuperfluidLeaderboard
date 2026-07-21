@@ -20,12 +20,18 @@
  */
 import { isArray, first, isFunction, noop, groupBy, last, add } from 'lodash';
 import { celo } from 'viem/chains';
-import { createPublicClient, getContract, http, padHex, parseAbi, getAddress } from 'viem';
+import { createPublicClient, getContract, http, padHex, parseAbi, getAddress, formatEther } from 'viem';
 import createClient from 'openapi-fetch';
 import { paths } from '../points-api';
 
 const MAX_DAILY_STREAM = BigInt(73000 * 1e18); //73k G$
 const MAX_STREAM_RATE = MAX_DAILY_STREAM / (24n * 60n * 60n);
+const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
+const ROUND_STREAM_EVENT_NAME = 'roundStreamed';
+const OPENSOURCE_STREAM_EVENT_NAME = 'opensourceStreamed';
+const OPENSOURCE_SENT_EVENT_NAME = 'opensourceSent';
+const ROUND_SUBGRAPH_URL = 'https://celo-mainnet.subgraph.x.superfluid.dev/';
+const ROUND_STREAMS_PAGE_SIZE = 1000;
 
 let globalEnv: { [key: string]: string };
 
@@ -38,7 +44,7 @@ function wait(ms: number): Promise<void> {
 
 export function retry<T>(
 	fn: () => Promise<T>,
-	{ n, waitMillis }: { n: number; waitMillis: number }
+	{ n, waitMillis }: { n: number; waitMillis: number },
 ): { promise: Promise<T>; cancel: () => void } {
 	let completed = false;
 	let rejectCancelled: (error: Error) => void;
@@ -169,6 +175,249 @@ const topWallet = async (address: string, clientIp: string) => {
 		return { ok: 0 };
 	}
 };
+
+const pushPointsDelta = async ({ address, eventName, points }: { address: string; eventName: string; points: number }) => {
+	if (points === 0) {
+		return;
+	}
+	await pointsClient.POST('/points/push', {
+		headers: { 'X-API-Key': globalEnv.STACK_KEY },
+		body: {
+			campaign: Number(globalEnv.STACK_POINT_SYSTEM_ID),
+			eventName,
+			account: address,
+			points,
+		},
+	});
+};
+
+const getEventBalance = async (address: string, eventName: string): Promise<number> => {
+	const { data } = await pointsClient.GET('/points/event-balance', {
+		params: {
+			query: {
+				campaignId: Number(globalEnv.STACK_POINT_SYSTEM_ID),
+				account: address,
+				eventName,
+			},
+		},
+	});
+	return Number(data?.points || 0);
+};
+
+const getStreamedToReceiverPoints = async ({
+	address,
+	receiver,
+	token,
+	pointsPerGdFloat,
+	eventName,
+	logPrefix,
+}: {
+	address: string;
+	receiver: string;
+	token: string;
+	pointsPerGdFloat: number;
+	eventName: string;
+	logPrefix: string;
+}): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
+	const sender = address.toLowerCase();
+	const query = `
+	query CFAStreamsQuery(
+	  $receiver: String!
+	  $sender: String!
+	  $token: String!
+	  $first: Int!
+	  $skip: Int!
+	) {
+	  streams(
+		where: { sender: $sender, receiver: $receiver, token: $token }
+		first: $first
+		skip: $skip
+	  ) {
+		currentFlowRate
+		streamedUntilUpdatedAt
+		updatedAtTimestamp
+	  }
+	}
+	`;
+
+	let skip = 0;
+	let hasMore = true;
+	let totalStreamedWei = 0n;
+	const nowTs = BigInt(Math.floor(Date.now() / 1000));
+
+	while (hasMore) {
+		const result = await retry(
+			() =>
+				fetch(ROUND_SUBGRAPH_URL, {
+					headers: { 'content-type': 'application/json' },
+					method: 'POST',
+					body: JSON.stringify({
+						query,
+						variables: {
+							receiver,
+							sender,
+							token,
+							first: ROUND_STREAMS_PAGE_SIZE,
+							skip,
+						},
+					}),
+				})
+					.then((result) => result.json())
+					.then((result: any) => {
+						if (isArray(result.data?.streams)) {
+							return result.data.streams;
+						}
+						throw new Error(`NOTOK ${JSON.stringify(result)}`);
+					})
+					.catch((e) => {
+						console.warn(`${logPrefix} fetch failed:`, e.message, e);
+						throw e;
+					}),
+			{ n: 3, waitMillis: 1000 },
+		).promise;
+
+		for (const stream of result as Array<{ currentFlowRate: string; streamedUntilUpdatedAt: string; updatedAtTimestamp: string }>) {
+			const streamedUntilUpdatedAt = BigInt(stream.streamedUntilUpdatedAt || '0');
+			const currentFlowRate = BigInt(stream.currentFlowRate || '0');
+			const updatedAtTs = BigInt(stream.updatedAtTimestamp || '0');
+			const activeStreamSeconds = nowTs > updatedAtTs ? nowTs - updatedAtTs : 0n;
+			totalStreamedWei += streamedUntilUpdatedAt + currentFlowRate * activeStreamSeconds;
+		}
+
+		hasMore = result.length === ROUND_STREAMS_PAGE_SIZE;
+		skip += ROUND_STREAMS_PAGE_SIZE;
+	}
+
+	const totalStreamedGd = formatEther(totalStreamedWei);
+	const totalPoints = Math.floor(parseFloat(totalStreamedGd) * pointsPerGdFloat);
+	const awardedSoFar = await getEventBalance(address, eventName);
+	const diff = totalPoints - awardedSoFar;
+
+	if (diff !== 0) {
+		console.log(`updating ${eventName} points`, {
+			address,
+			totalStreamedWei: totalStreamedWei.toString(),
+			totalPoints,
+			awardedSoFar,
+			diff,
+		});
+		await pushPointsDelta({ address, eventName, points: diff });
+	}
+
+	return {
+		totalStreamedGd,
+		awardedPoints: String(totalPoints),
+	};
+};
+
+const getRoundSplitterStreamPoints = async (address: string): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
+	try {
+		const receiver = globalEnv.ROUND_SPLITTER?.toLowerCase();
+		const token = globalEnv.ROUND_GD_SUPER_TOKEN?.toLowerCase();
+		const pointsPerGdFloat = parseFloat(globalEnv.ROUND_POINTS_PER_GD || '0');
+
+		if (!receiver || !token) {
+			console.warn('ROUND_SPLITTER or ROUND_GD_SUPER_TOKEN missing, skipping round streamed points', {
+				address,
+				receiver,
+				token,
+			});
+			return { totalStreamedGd: '0', awardedPoints: '0' };
+		}
+
+		return getStreamedToReceiverPoints({
+			address,
+			receiver,
+			token,
+			pointsPerGdFloat,
+			eventName: ROUND_STREAM_EVENT_NAME,
+			logPrefix: 'getRoundSplitterStreamPoints',
+		});
+	} catch (e: any) {
+		console.error('getRoundSplitterStreamPoints failed', e.message, e);
+		throw e;
+	}
+};
+
+const getOpenSourcePoolStreamPoints = async (address: string): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
+	try {
+		const receiver = globalEnv.OPENSOURCE_POOL?.toLowerCase();
+		const token = globalEnv.OPENSOURCE_GD_SUPER_TOKEN?.toLowerCase();
+		const pointsPerGdFloat = parseFloat(globalEnv.OPENSOURCE_STREAM_POINTS_PER_GD || '0');
+
+		if (!receiver || !token) {
+			console.warn('OPENSOURCE_POOL or OPENSOURCE_GD_SUPER_TOKEN missing, skipping opensource pool streamed points', {
+				address,
+				receiver,
+				token,
+			});
+			return { totalStreamedGd: '0', awardedPoints: '0' };
+		}
+
+		return getStreamedToReceiverPoints({
+			address,
+			receiver,
+			token,
+			pointsPerGdFloat,
+			eventName: OPENSOURCE_STREAM_EVENT_NAME,
+			logPrefix: 'getOpenSourcePoolStreamPoints',
+		});
+	} catch (e: any) {
+		console.error('getOpenSourcePoolStreamPoints failed', e.message, e);
+		throw e;
+	}
+};
+
+const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: string; awardedPoints: string }> => {
+	try {
+		const tokenAddress = globalEnv.OPENSOURCE_GD_TOKEN;
+		const receiver = globalEnv.OPENSOURCE_POOL;
+		const pointsPerGdFloat = parseFloat(globalEnv.OPENSOURCE_SENT_POINTS_PER_GD || '0');
+		if (!tokenAddress || !receiver) {
+			console.warn('OPENSOURCE_GD_TOKEN or OPENSOURCE_POOL missing, skipping opensource sent points', {
+				address,
+				tokenAddress,
+				receiver,
+			});
+			return { totalSentGd: '0', awardedPoints: '0' };
+		}
+
+		const query = {
+			address: tokenAddress,
+			topic0: ERC20_TRANSFER_TOPIC,
+			topic0_1_opr: 'and',
+			topic1_2_opr: 'and',
+			topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+			topic2: padHex(receiver as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+			fromBlock: globalEnv.FROM_BLOCK || 20506082,
+			toBlock: 'latest',
+			offset: 1000,
+		};
+		const events = await getExplorerEvents(tokenAddress, query);
+		const totalSentWei = events.reduce((acc, cur) => acc + BigInt(cur.data || '0x0'), 0n);
+		const totalSentGd = formatEther(totalSentWei);
+		const totalPoints = Math.floor(parseFloat(totalSentGd) * pointsPerGdFloat);
+		const awardedSoFar = await getEventBalance(address, OPENSOURCE_SENT_EVENT_NAME);
+		const diff = totalPoints - awardedSoFar;
+
+		if (diff !== 0) {
+			console.log('updating opensource sent points', {
+				address,
+				totalSentWei: totalSentWei.toString(),
+				totalPoints,
+				awardedSoFar,
+				diff,
+			});
+			await pushPointsDelta({ address, eventName: OPENSOURCE_SENT_EVENT_NAME, points: diff });
+		}
+
+		return { totalSentGd, awardedPoints: String(totalPoints) };
+	} catch (e: any) {
+		console.error('getOpenSourceSentPoints failed', e.message, e);
+		throw e;
+	}
+};
+
 const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 	const subgraphUrl = globalEnv.SUBGRAPH_URL;
 	const query = `
@@ -213,7 +462,7 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 						console.warn('getGoodCollectiveStreams fetch failed:', e.message, e);
 						throw e;
 					}),
-			{ n: 3, waitMillis: 1000 }
+			{ n: 3, waitMillis: 1000 },
 		).promise;
 
 		console.log('getGoodCollectiveStreams result:', result.length);
@@ -256,7 +505,7 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 		console.log(
 			'fetched streams result:',
 			{ address, totalStreamed: totalStreamed.toString(), sqrdStreamed, streamedSoFar },
-			Object.keys(streamsByCollective)
+			Object.keys(streamsByCollective),
 		);
 		const diff = sqrdStreamed - streamedSoFar;
 		if (diff !== 0) {
@@ -396,9 +645,35 @@ const getClaims = async (address: string): Promise<string> => {
 	}
 };
 
-const fetchWalletData = async (address: string): Promise<{ claims: string; invites: string }> => {
-	const [claims, invites] = await Promise.all([getClaims(address), getInviteEvents(address)]);
-	return { claims, invites };
+const fetchWalletData = async (
+	address: string,
+): Promise<{
+	claims: string;
+	invites: string;
+	roundStreamedToSplitter: string;
+	roundStreamedPoints: string;
+	opensourceStreamedToPool: string;
+	opensourceStreamedPoints: string;
+	opensourceSentGd: string;
+	opensourceSentPoints: string;
+}> => {
+	const [claims, invites, roundStreamed, opensourceStreamed, opensourceSent] = await Promise.all([
+		getClaims(address),
+		getInviteEvents(address),
+		getRoundSplitterStreamPoints(address),
+		getOpenSourcePoolStreamPoints(address),
+		getOpenSourceSentPoints(address),
+	]);
+	return {
+		claims,
+		invites,
+		roundStreamedToSplitter: roundStreamed.totalStreamedGd,
+		roundStreamedPoints: roundStreamed.awardedPoints,
+		opensourceStreamedToPool: opensourceStreamed.totalStreamedGd,
+		opensourceStreamedPoints: opensourceStreamed.awardedPoints,
+		opensourceSentGd: opensourceSent.totalSentGd,
+		opensourceSentPoints: opensourceSent.awardedPoints,
+	};
 };
 const verifyWhitelisted = async (address: `0x${string}`): Promise<boolean> => {
 	const client = createPublicClient({
@@ -434,7 +709,7 @@ export default {
 					JSON.stringify({
 						error: 'not whitelisted',
 					}),
-					{ headers: getHeaders(), status: 200 }
+					{ headers: getHeaders(), status: 200 },
 				);
 			}
 			const [topWalletResult, walletData] = await Promise.all([topWallet(address, clientIp || ''), fetchWalletData(address)]);
@@ -444,7 +719,7 @@ export default {
 					topWalletResult,
 					walletData,
 				}),
-				{ headers: getHeaders(), status: 200 }
+				{ headers: getHeaders(), status: 200 },
 			);
 		} catch (e: any) {
 			console.error('superfluid request failed', { address, error: e.message, e, globalEnv });
