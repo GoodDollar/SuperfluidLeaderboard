@@ -30,13 +30,96 @@ const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a116
 const ROUND_STREAM_EVENT_NAME = 'roundStreamed';
 const OPENSOURCE_STREAM_EVENT_NAME = 'opensourceStreamed';
 const OPENSOURCE_SENT_EVENT_NAME = 'opensourceSent';
+const ROUND_VOTE_EVENT_NAME = 'roundVotes';
+const G_DONATION_EVENT_NAMES = new Set([
+	'streamed',
+	ROUND_STREAM_EVENT_NAME,
+	OPENSOURCE_STREAM_EVENT_NAME,
+	OPENSOURCE_SENT_EVENT_NAME,
+]);
 const ROUND_SUBGRAPH_URL = 'https://celo-mainnet.subgraph.x.superfluid.dev/';
+const FLOW_COUNCIL_SUBGRAPH_URL =
+	'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn';
 const ROUND_STREAMS_PAGE_SIZE = 1000;
+const ROUND_BALLOTS_PAGE_SIZE = 1000;
+const TWO_WEEKS_SECONDS = 14 * 24 * 60 * 60;
+const ADDRESS_RATE_LIMIT_SECONDS = 60 * 60;
 
 let globalEnv: { [key: string]: string };
 
 const pointsClient = createClient<paths>({ baseUrl: 'https://cms.superfluid.pro' });
 // API key passed per-request for push operations
+
+const getCampaignIdForEvent = (eventName: string): number => {
+	const defaultCampaignId = Number(globalEnv.STACK_POINT_SYSTEM_ID);
+	if (Number.isNaN(defaultCampaignId)) {
+		throw new Error('STACK_POINT_SYSTEM_ID is missing or invalid');
+	}
+
+	if (!G_DONATION_EVENT_NAMES.has(eventName)) {
+		return defaultCampaignId;
+	}
+
+	const gdCampaignIdRaw = globalEnv.STACK_G_DONATION_POINT_SYSTEM_ID;
+	if (!gdCampaignIdRaw) {
+		return defaultCampaignId;
+	}
+
+	const gdCampaignId = Number(gdCampaignIdRaw);
+	if (Number.isNaN(gdCampaignId)) {
+		throw new Error('STACK_G_DONATION_POINT_SYSTEM_ID is invalid');
+	}
+
+	return gdCampaignId;
+};
+
+const getCampaignApiKeyForEvent = (eventName: string): string => {
+	const defaultApiKey = globalEnv.STACK_KEY;
+	if (!defaultApiKey) {
+		throw new Error('STACK_KEY is missing');
+	}
+
+	if (!G_DONATION_EVENT_NAMES.has(eventName)) {
+		return defaultApiKey;
+	}
+
+	return globalEnv.STACK_G_DONATION_KEY || defaultApiKey;
+};
+
+const getRateLimitWindowSeconds = (): number => {
+	const configured = Number(globalEnv.ADDRESS_RATE_LIMIT_SECONDS || ADDRESS_RATE_LIMIT_SECONDS);
+	if (!Number.isFinite(configured) || configured <= 0) {
+		return ADDRESS_RATE_LIMIT_SECONDS;
+	}
+	return Math.floor(configured);
+};
+
+const getRateLimitCacheKey = (address: string): Request => {
+	return new Request(`https://superfluid-airdrop-rate-limit/${address.toLowerCase()}`);
+};
+
+const isAddressRateLimited = async (address: string, ctx: ExecutionContext): Promise<boolean> => {
+	const cache = caches.default;
+	const key = getRateLimitCacheKey(address);
+	const existing = await cache.match(key);
+	if (existing) {
+		return true;
+	}
+
+	const windowSeconds = getRateLimitWindowSeconds();
+	ctx.waitUntil(
+		cache.put(
+			key,
+			new Response('1', {
+				headers: {
+					'Cache-Control': `public, max-age=${windowSeconds}`,
+				},
+			}),
+		),
+	);
+
+	return false;
+};
 
 function wait(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -193,10 +276,12 @@ const pushPointsDelta = async ({ address, eventName, points }: { address: string
 	if (points === 0) {
 		return;
 	}
+	const campaignId = getCampaignIdForEvent(eventName);
+	const campaignApiKey = getCampaignApiKeyForEvent(eventName);
 	const result = await pointsClient.POST('/points/push', {
-		headers: { 'X-API-Key': globalEnv.STACK_KEY },
+		headers: { 'X-API-Key': campaignApiKey },
 		body: {
-			campaign: Number(globalEnv.STACK_POINT_SYSTEM_ID),
+			campaign: campaignId,
 			eventName,
 			account: address,
 			points,
@@ -208,10 +293,13 @@ const pushPointsDelta = async ({ address, eventName, points }: { address: string
 };
 
 const getEventBalance = async (address: string, eventName: string): Promise<number> => {
+	const campaignId = getCampaignIdForEvent(eventName);
+	const campaignApiKey = getCampaignApiKeyForEvent(eventName);
 	const { data } = await pointsClient.GET('/points/event-balance', {
+		headers: { 'X-API-Key': campaignApiKey },
 		params: {
 			query: {
-				campaignId: Number(globalEnv.STACK_POINT_SYSTEM_ID),
+				campaignId,
 				account: address,
 				eventName,
 			},
@@ -458,6 +546,7 @@ const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: 
 				offset: 1000,
 			};
 			const events = await getExplorerEvents(tokenAddress, query);
+			console.log('getOpenSourceSentPoints events', events, { fromBlock: globalEnv.FROM_BLOCK });
 			totalSentWei += events.reduce((acc, cur) => acc + BigInt(cur.data || '0x0'), 0n);
 		}
 		const totalSentGd = formatEther(totalSentWei);
@@ -480,6 +569,114 @@ const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: 
 		return { totalSentGd, awardedPoints: String(totalPoints) };
 	} catch (e: any) {
 		console.error('getOpenSourceSentPoints failed', e.message, e);
+		throw e;
+	}
+};
+
+const getCountedRoundVotes = (timestamps: number[]): number => {
+	const countedVoteTimestamps: number[] = [];
+	const window: number[] = [];
+
+	for (const ts of timestamps) {
+		while (window.length > 0 && ts - window[0] >= TWO_WEEKS_SECONDS) {
+			window.shift();
+		}
+
+		if (window.length < 2) {
+			window.push(ts);
+			countedVoteTimestamps.push(ts);
+		}
+	}
+
+	return countedVoteTimestamps.length;
+};
+
+const getRoundVotesPoints = async (address: string): Promise<{ totalVotes: string; countedVotes: string; awardedPoints: string }> => {
+	try {
+		const roundCouncil = globalEnv.ROUND_COUNCIL?.toLowerCase();
+		const pointsPerVote = Number(globalEnv.VOTE_POINTS || 0);
+		if (!roundCouncil) {
+			console.warn('ROUND_COUNCIL missing, skipping round votes points', { address, roundCouncil });
+			return { totalVotes: '0', countedVotes: '0', awardedPoints: '0' };
+		}
+
+		const subgraphUrl = globalEnv.FLOW_COUNCIL_SUBGRAPH_URL || FLOW_COUNCIL_SUBGRAPH_URL;
+		const voter = `${roundCouncil}-${address.toLowerCase()}`;
+		const query = `
+		query RoundVotesQuery($voter: String!, $first: Int!, $skip: Int!) {
+		  ballots(where: { voter: $voter }, first: $first, skip: $skip, orderBy: createdAtTimestamp, orderDirection: asc) {
+			id
+			createdAtTimestamp
+		  }
+		}
+		`;
+
+		let skip = 0;
+		let hasMore = true;
+		const timestamps: number[] = [];
+
+		while (hasMore) {
+			const ballots = await retry(
+				() =>
+					fetch(subgraphUrl, {
+						headers: { 'content-type': 'application/json' },
+						method: 'POST',
+						body: JSON.stringify({
+							query,
+							variables: {
+								voter,
+								first: ROUND_BALLOTS_PAGE_SIZE,
+								skip,
+							},
+						}),
+					})
+						.then((result) => result.json())
+						.then((result: any) => {
+							if (isArray(result.data?.ballots)) {
+								return result.data.ballots;
+							}
+							throw new Error(`NOTOK ${JSON.stringify(result)}`);
+						})
+						.catch((e) => {
+							console.warn('getRoundVotesPoints fetch failed:', e.message, e);
+							throw e;
+						}),
+				{ n: 3, waitMillis: 1000 },
+			).promise;
+
+			for (const ballot of ballots as Array<{ createdAtTimestamp: string }>) {
+				timestamps.push(Number(ballot.createdAtTimestamp || '0'));
+			}
+
+			hasMore = ballots.length === ROUND_BALLOTS_PAGE_SIZE;
+			skip += ROUND_BALLOTS_PAGE_SIZE;
+		}
+
+		const countedVotes = getCountedRoundVotes(timestamps.sort((a, b) => a - b));
+		const totalPoints = countedVotes * pointsPerVote;
+		const awardedSoFar = await getEventBalance(address, ROUND_VOTE_EVENT_NAME);
+		const diff = totalPoints - awardedSoFar;
+
+		if (diff !== 0) {
+			console.log('updating round votes points', {
+				address,
+				voter,
+				totalVotes: timestamps.length,
+				countedVotes,
+				totalPoints,
+				awardedSoFar,
+				diff,
+			});
+			await pushPointsDelta({ address, eventName: ROUND_VOTE_EVENT_NAME, points: diff });
+		}
+
+		return {
+			totalVotes: String(timestamps.length),
+			countedVotes: String(countedVotes),
+			awardedPoints: String(totalPoints),
+		};
+	} catch (e: any) {
+		console.error('getRoundVotesPoints failed', e.message, e);
 		throw e;
 	}
 };
@@ -681,13 +878,17 @@ const fetchWalletData = async (
 	opensourceStreamedPoints: string;
 	opensourceSentGd: string;
 	opensourceSentPoints: string;
+	roundVotes: string;
+	roundCountedVotes: string;
+	roundVotesPoints: string;
 }> => {
-	const [claims, invites, roundStreamed, opensourceStreamed, opensourceSent] = await Promise.all([
+	const [claims, invites, roundStreamed, opensourceStreamed, opensourceSent, roundVotes] = await Promise.all([
 		getClaims(address),
 		getInviteEvents(address),
 		getRoundSplitterStreamPoints(address),
 		getOpenSourcePoolStreamPoints(address),
 		getOpenSourceSentPoints(address),
+		getRoundVotesPoints(address),
 	]);
 	return {
 		claims,
@@ -698,6 +899,9 @@ const fetchWalletData = async (
 		opensourceStreamedPoints: opensourceStreamed.awardedPoints,
 		opensourceSentGd: opensourceSent.totalSentGd,
 		opensourceSentPoints: opensourceSent.awardedPoints,
+		roundVotes: roundVotes.totalVotes,
+		roundCountedVotes: roundVotes.countedVotes,
+		roundVotesPoints: roundVotes.awardedPoints,
 	};
 };
 const verifyWhitelisted = async (address: `0x${string}`): Promise<boolean> => {
@@ -721,6 +925,18 @@ export default {
 		console.log('incoming request:', address, clientIp);
 		if (!address) {
 			throw new Error('missing wallet address');
+		}
+
+		if (await isAddressRateLimited(address, ctx)) {
+			const headers = getHeaders();
+			headers.set('Retry-After', String(getRateLimitWindowSeconds()));
+			return new Response(
+				JSON.stringify({
+					error: 'rate_limit_exceeded',
+					message: 'Only 1 request per hour is allowed per address',
+				}),
+				{ headers, status: 429 },
+			);
 		}
 		try {
 			// stack = new StackClient({
