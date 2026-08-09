@@ -31,12 +31,7 @@ const ROUND_STREAM_EVENT_NAME = 'roundStreamed';
 const OPENSOURCE_STREAM_EVENT_NAME = 'opensourceStreamed';
 const OPENSOURCE_SENT_EVENT_NAME = 'opensourceSent';
 const ROUND_VOTE_EVENT_NAME = 'roundVotes';
-const G_DONATION_EVENT_NAMES = new Set([
-	'streamed',
-	ROUND_STREAM_EVENT_NAME,
-	OPENSOURCE_STREAM_EVENT_NAME,
-	OPENSOURCE_SENT_EVENT_NAME,
-]);
+const G_DONATION_EVENT_NAMES = new Set(['streamed', ROUND_STREAM_EVENT_NAME, OPENSOURCE_STREAM_EVENT_NAME, OPENSOURCE_SENT_EVENT_NAME]);
 const ROUND_SUBGRAPH_URL = 'https://celo-mainnet.subgraph.x.superfluid.dev/';
 const FLOW_COUNCIL_SUBGRAPH_URL =
 	'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn';
@@ -324,22 +319,36 @@ const getStreamedToReceiverWei = async ({
 	if (normalizedReceivers.length === 0) {
 		return 0n;
 	}
+	const campaignStartTs = BigInt(Math.max(0, Number(globalEnv.FROM_TS || 0)));
 	const query = `
-	query CFAStreamsQuery(
-	  $receivers: [String!]!
+	query StreamPeriodsPage(
 	  $sender: String!
+	  $receivers: [String!]!
 	  $token: String!
+	  $daysago: BigInt!
+	  $until: BigInt!
 	  $first: Int!
 	  $skip: Int!
 	) {
-	  streams(
-		where: { sender: $sender, receiver_in: $receivers, token: $token }
+	  streamPeriods(
+		where: {
+		  or: [
+			{ sender: $sender, receiver_in: $receivers, token: $token, stoppedAtTimestamp: null, startedAtTimestamp_lte: $until },
+			{ sender: $sender, receiver_in: $receivers, token: $token, stoppedAtTimestamp_gt: $daysago, startedAtTimestamp_lte: $until }
+		  ]
+		}
 		first: $first
 		skip: $skip
 	  ) {
-		currentFlowRate
-		streamedUntilUpdatedAt
-		updatedAtTimestamp
+		sender {
+		  id
+		}
+		flowRate
+		startedAtTimestamp
+		stoppedAtTimestamp
+		stream {
+		  userData
+		}
 	  }
 	}
 	`;
@@ -358,9 +367,11 @@ const getStreamedToReceiverWei = async ({
 					body: JSON.stringify({
 						query,
 						variables: {
-							receivers: normalizedReceivers,
 							sender,
+							receivers: normalizedReceivers,
 							token,
+							daysago: campaignStartTs.toString(),
+							until: nowTs.toString(),
 							first: ROUND_STREAMS_PAGE_SIZE,
 							skip,
 						},
@@ -368,8 +379,8 @@ const getStreamedToReceiverWei = async ({
 				})
 					.then((result) => result.json())
 					.then((result: any) => {
-						if (isArray(result.data?.streams)) {
-							return result.data.streams;
+						if (isArray(result.data?.streamPeriods)) {
+							return result.data.streamPeriods;
 						}
 						throw new Error(`NOTOK ${JSON.stringify(result)}`);
 					})
@@ -380,12 +391,28 @@ const getStreamedToReceiverWei = async ({
 			{ n: 3, waitMillis: 1000 },
 		).promise;
 
-		for (const stream of result as Array<{ currentFlowRate: string; streamedUntilUpdatedAt: string; updatedAtTimestamp: string }>) {
-			const streamedUntilUpdatedAt = BigInt(stream.streamedUntilUpdatedAt || '0');
-			const currentFlowRate = BigInt(stream.currentFlowRate || '0');
-			const updatedAtTs = BigInt(stream.updatedAtTimestamp || '0');
-			const activeStreamSeconds = nowTs > updatedAtTs ? nowTs - updatedAtTs : 0n;
-			totalStreamedWei += streamedUntilUpdatedAt + currentFlowRate * activeStreamSeconds;
+		for (const streamPeriod of result as Array<{
+			sender?: { id?: string };
+			flowRate: string;
+			startedAtTimestamp: string;
+			stoppedAtTimestamp: string | null;
+		}>) {
+			if (streamPeriod?.sender?.id?.toLowerCase() !== sender) {
+				continue;
+			}
+
+			const flowRate = BigInt(streamPeriod.flowRate || '0');
+			if (flowRate <= 0n) {
+				continue;
+			}
+
+			const startedAtTs = BigInt(streamPeriod.startedAtTimestamp || '0');
+			const stoppedAtTs = streamPeriod.stoppedAtTimestamp ? BigInt(streamPeriod.stoppedAtTimestamp) : nowTs;
+			const effectiveStart = startedAtTs > campaignStartTs ? startedAtTs : campaignStartTs;
+			const effectiveStop = stoppedAtTs < nowTs ? stoppedAtTs : nowTs;
+			const streamedSeconds = effectiveStop > effectiveStart ? effectiveStop - effectiveStart : 0n;
+
+			totalStreamedWei += flowRate * streamedSeconds;
 		}
 
 		hasMore = result.length === ROUND_STREAMS_PAGE_SIZE;
