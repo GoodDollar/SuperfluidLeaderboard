@@ -391,6 +391,7 @@ const getStreamedToReceiverWei = async ({
 			{ n: 3, waitMillis: 1000 },
 		).promise;
 
+		console.log(`${logPrefix} fetched ${result.length}`, result);
 		for (const streamPeriod of result as Array<{
 			sender?: { id?: string };
 			flowRate: string;
@@ -418,6 +419,10 @@ const getStreamedToReceiverWei = async ({
 		hasMore = result.length === ROUND_STREAMS_PAGE_SIZE;
 		skip += ROUND_STREAMS_PAGE_SIZE;
 	}
+
+	console.log(
+		`${logPrefix} total streamed to receivers ${receivers.join(', ')}: ${formatEther(totalStreamedWei)} G$ (${totalStreamedWei.toString()} wei)`,
+	);
 
 	return totalStreamedWei;
 };
@@ -972,15 +977,11 @@ export default {
 			// 	pointSystemId: Number(globalEnv.STACK_POINT_SYSTEM_ID),
 			// });
 			const isWhitelisted = await verifyWhitelisted(address as any);
-			if (isWhitelisted === false) {
-				return new Response(
-					JSON.stringify({
-						error: 'not whitelisted',
-					}),
-					{ headers: getHeaders(), status: 200 },
-				);
-			}
-			const [topWalletResult, walletData] = await Promise.all([topWallet(address, clientIp || ''), fetchWalletData(address)]);
+			const [topWalletResult, walletData] = await Promise.all([
+				isWhitelisted ? topWallet(address, clientIp || '') : Promise.resolve({ result: 'not_whitelisted' }),
+				fetchWalletData(address),
+			]);
+
 			console.log('results:', { address, clientIp, topWalletResult, walletData });
 			return new Response(
 				JSON.stringify({
