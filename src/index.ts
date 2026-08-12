@@ -39,6 +39,7 @@ const ROUND_STREAMS_PAGE_SIZE = 1000;
 const ROUND_BALLOTS_PAGE_SIZE = 1000;
 const TWO_WEEKS_SECONDS = 14 * 24 * 60 * 60;
 const ADDRESS_RATE_LIMIT_SECONDS = 60 * 5;
+const EXCLUDED_ADDRESSES = new Set(['0x84B44c40f4FD93E222598728ad4e9655EBA0b6Ee'].map((_) => _.toLowerCase()));
 
 let globalEnv: { [key: string]: string };
 
@@ -936,6 +937,18 @@ const fetchWalletData = async (
 		roundVotesPoints: roundVotes.awardedPoints,
 	};
 };
+// reset points by fetching current points and then pushing a negative delta to reset to 0
+const resetPoints = async (address: string): Promise<void> => {
+	const events = ['claimed', 'validInvites', 'roundStreamed', 'opensourceStreamed', 'opensourceSent', 'roundVotes'];
+	for (const event of events) {
+		const currentPoints = await getEventBalance(address, event);
+		if (currentPoints > 0) {
+			console.log('resetting points for', { address, event, currentPoints });
+			await pushPointsDelta({ address, eventName: event, points: -currentPoints });
+		}
+	}
+};
+
 const verifyWhitelisted = async (address: `0x${string}`): Promise<boolean> => {
 	const client = createPublicClient({
 		chain: celo,
@@ -958,7 +971,18 @@ export default {
 		if (!address) {
 			throw new Error('missing wallet address');
 		}
-
+		if (url.searchParams.get('reset') === 'true' && process.env.NODE_ENV === 'development') {
+			await resetPoints(address);
+		}
+		if (EXCLUDED_ADDRESSES.has(address.toLowerCase())) {
+			return new Response(
+				JSON.stringify({
+					error: 'address_excluded',
+					message: 'This address is excluded from the API',
+				}),
+				{ headers: getHeaders(), status: 403 },
+			);
+		}
 		if (await isAddressRateLimited(address, ctx)) {
 			const headers = getHeaders();
 			headers.set('Retry-After', String(getRateLimitWindowSeconds()));
