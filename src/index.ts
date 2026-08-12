@@ -20,13 +20,14 @@
  */
 import { isArray, first, isFunction, noop, groupBy, last, add } from 'lodash';
 import { celo } from 'viem/chains';
-import { createPublicClient, getContract, http, padHex, parseAbi, getAddress, formatEther } from 'viem';
+import { createPublicClient, getContract, http, parseAbi, getAddress, formatEther } from 'viem';
 import createClient from 'openapi-fetch';
 import { paths } from '../points-api';
+// import { createViemFallbackClient } from './viemFallbackClient';
 
+// let viemFallback: ReturnType<typeof createViemFallbackClient>;
 const MAX_DAILY_STREAM = BigInt(73000 * 1e18); //73k G$
 const MAX_STREAM_RATE = MAX_DAILY_STREAM / (24n * 60n * 60n);
-const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const ROUND_STREAM_EVENT_NAME = 'roundStreamed';
 const OPENSOURCE_STREAM_EVENT_NAME = 'opensourceStreamed';
 const OPENSOURCE_SENT_EVENT_NAME = 'opensourceSent';
@@ -38,7 +39,7 @@ const FLOW_COUNCIL_SUBGRAPH_URL =
 const ROUND_STREAMS_PAGE_SIZE = 1000;
 const ROUND_BALLOTS_PAGE_SIZE = 1000;
 const TWO_WEEKS_SECONDS = 14 * 24 * 60 * 60;
-const ADDRESS_RATE_LIMIT_SECONDS = 60 * 5;
+const ADDRESS_RATE_LIMIT_SECONDS = 60;
 const EXCLUDED_ADDRESSES = new Set(['0x84B44c40f4FD93E222598728ad4e9655EBA0b6Ee'].map((_) => _.toLowerCase()));
 
 let globalEnv: { [key: string]: string };
@@ -208,8 +209,10 @@ const parseReceivers = (value: string | undefined): string[] => {
 	return [...new Set(receivers)];
 };
 
-export const getExplorerEvents = async (address: string, query: any): Promise<Array<any>> => {
-	const networkExplorerUrls = 'https://celo.blockscout.com/api';
+const LOG_CHUNK_SIZE = 5000n;
+
+export const getExplorerEventsByApi = async (address: string, query: any): Promise<Array<any>> => {
+	const networkExplorerUrls = 'https://api.etherscan.com/v2/api?chainid=42220,https://celo.blockscout.com/api';
 
 	const params = {
 		module: 'logs',
@@ -219,7 +222,7 @@ export const getExplorerEvents = async (address: string, query: any): Promise<Ar
 		page: 1,
 		offset: 1000,
 		...query,
-		apikey: globalEnv.CELOSCAN_KEY,
+		apikey: globalEnv.ETHERSCAN_KEY,
 	};
 
 	const calls = networkExplorerUrls.split(',').map((networkExplorerUrl) => {
@@ -245,6 +248,56 @@ export const getExplorerEvents = async (address: string, query: any): Promise<Ar
 		};
 	});
 	return retry(() => fallback(calls) as any, { n: 3, waitMillis: 500 }).promise as any;
+};
+
+export const getExplorerEvents = async (address: string, query: any): Promise<Array<any>> => {
+	const client = await viemFallback.createPublicClient({
+		chain: celo,
+		fallbackRpcs: globalEnv.CELO_RPC ? [globalEnv.CELO_RPC] : [],
+	});
+
+	const contractAddress = (query.address || address) as `0x${string}`;
+
+	// build topics array, preserving null gaps for missing intermediate topics
+	const topics: (`0x${string}` | null)[] = [];
+	if (query.topic0) topics.push(query.topic0 as `0x${string}`);
+	if (query.topic1 || query.topic2) topics.push((query.topic1 ?? null) as `0x${string}` | null);
+	if (query.topic2) topics.push(query.topic2 as `0x${string}`);
+
+	const latestBlock = await client.getBlockNumber();
+	const fromBlock = query.fromBlock ? BigInt(query.fromBlock) : 0n;
+	const toBlock = !query.toBlock || query.toBlock === 'latest' ? latestBlock : BigInt(query.toBlock);
+
+	const chunks: [bigint, bigint][] = [];
+	for (let start = fromBlock; start <= toBlock; start += LOG_CHUNK_SIZE) {
+		const end = start + LOG_CHUNK_SIZE - 1n < toBlock ? start + LOG_CHUNK_SIZE - 1n : toBlock;
+		chunks.push([start, end]);
+	}
+
+	const CONCURRENCY = 5;
+	const allLogs: any[] = [];
+	for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+		const batch = chunks.slice(i, i + CONCURRENCY);
+		console.log(`Fetching logs for ${contractAddress} from ${batch[0][0]} to ${last(batch)?.[1]} (chunk ${i + 1} of ${chunks.length})`);
+		const results = await Promise.all(
+			batch.map(
+				([start, end]) =>
+					retry(
+						() =>
+							(client.getLogs as (args: object) => Promise<any[]>)({
+								address: contractAddress,
+								topics,
+								fromBlock: start,
+								toBlock: end,
+							}),
+						{ n: 3, waitMillis: 500 },
+					).promise,
+			),
+		);
+		for (const logs of results) allLogs.push(...logs);
+	}
+
+	return allLogs;
 };
 
 const topWallet = async (address: string, clientIp: string) => {
@@ -428,6 +481,103 @@ const getStreamedToReceiverWei = async ({
 	return totalStreamedWei;
 };
 
+const TRANSFER_EVENTS_PAGE_SIZE = 1000;
+
+const getTransferEventsFromSubgraph = async ({
+	fromAddresses,
+	toAddresses,
+	tokenAddress,
+	fromBlock,
+	logPrefix,
+}: {
+	fromAddresses: string[];
+	toAddresses: string[];
+	tokenAddress: string;
+	fromBlock: string | number;
+	logPrefix: string;
+}): Promise<Array<{ id: string; value: string; blockNumber: string; from: { id: string }; to: { id: string } }>> => {
+	const normalizedFrom = [...new Set(fromAddresses.map((from) => from.toLowerCase()))];
+	const normalizedTo = [...new Set(toAddresses.map((to) => to.toLowerCase()))];
+	if (normalizedFrom.length === 0 || normalizedTo.length === 0) {
+		return [];
+	}
+
+	const parsedSubgraphUrl = new URL(ROUND_SUBGRAPH_URL);
+
+	const query = `
+	query TransferEventsPage($token: Bytes!, $froms: [String!]!, $tos: [String!]!, $fromBlock: BigInt!, $first: Int!, $skip: Int!) {
+	  transferEvents(
+		where: { token: $token, from_in: $froms, to_in: $tos, blockNumber_gte: $fromBlock }
+		first: $first
+		skip: $skip
+		orderBy: blockNumber
+		orderDirection: asc
+	  ) {
+		id
+		value
+		blockNumber
+		from {
+		  id
+		}
+		to {
+		  id
+		}
+	  }
+	}
+	`;
+
+	const startBlock = BigInt(Math.max(0, Number(fromBlock || 0)));
+	let skip = 0;
+	let hasMore = true;
+	const allEvents: Array<{ id: string; value: string; blockNumber: string; from: { id: string }; to: { id: string } }> = [];
+
+	while (hasMore) {
+		const events = await retry(
+			() =>
+				fetch(parsedSubgraphUrl.href, {
+					headers: { 'content-type': 'application/json' },
+					method: 'POST',
+					body: JSON.stringify({
+						query,
+						variables: {
+							token: tokenAddress.toLowerCase(),
+							froms: normalizedFrom,
+							tos: normalizedTo,
+							fromBlock: startBlock.toString(),
+							first: TRANSFER_EVENTS_PAGE_SIZE,
+							skip,
+						},
+					}),
+				})
+					.then((result) => result.json())
+					.then((result: any) => {
+						if (isArray(result.data?.transferEvents)) {
+							return result.data.transferEvents;
+						}
+						throw new Error(`NOTOK ${JSON.stringify(result)}`);
+					})
+					.catch((e) => {
+						console.warn(`${logPrefix} transferEvents fetch failed:`, e.message, e);
+						throw e;
+					}),
+			{ n: 3, waitMillis: 1000 },
+		).promise;
+
+		allEvents.push(...events);
+		hasMore = events.length === TRANSFER_EVENTS_PAGE_SIZE;
+		skip += TRANSFER_EVENTS_PAGE_SIZE;
+	}
+
+	console.log(`${logPrefix} fetched ${allEvents.length} subgraph transfer events`, {
+		fromAddresses: normalizedFrom,
+		toAddresses: normalizedTo,
+		tokenAddress: tokenAddress.toLowerCase(),
+		fromBlock: startBlock.toString(),
+	});
+
+	return allEvents;
+};
+
 const getStreamedToReceiverPoints = async ({
 	address,
 	receiver,
@@ -552,7 +702,7 @@ const getOpenSourcePoolStreamPoints = async (address: string): Promise<{ totalSt
 
 const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: string; awardedPoints: string }> => {
 	try {
-		const tokenAddress = globalEnv.GOODDOLLAR;
+		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
 		const receivers = parseReceivers(globalEnv.OPENSOURCE_POOLS);
 		const pointsPerGdFloat = parseFloat(globalEnv.OPENSOURCE_SENT_POINTS_PER_GD || '0');
 		if (!tokenAddress || receivers.length === 0) {
@@ -564,24 +714,14 @@ const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: 
 			return { totalSentGd: '0', awardedPoints: '0' };
 		}
 
-		let totalSentWei = 0n;
-		for (const receiver of receivers) {
-			const query = {
-				address: tokenAddress,
-				topic0: ERC20_TRANSFER_TOPIC,
-				topic0_1_opr: 'and',
-				topic0_2_opr: 'and',
-				topic1_2_opr: 'and',
-				topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
-				topic2: padHex(receiver as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
-				fromBlock: globalEnv.FROM_BLOCK || 20506082,
-				toBlock: 'latest',
-				offset: 1000,
-			};
-			const events = await getExplorerEvents(tokenAddress, query);
-			console.log('getOpenSourceSentPoints events', events, { fromBlock: globalEnv.FROM_BLOCK, receiver });
-			totalSentWei += events.reduce((acc, cur) => acc + BigInt(cur.data || '0x0'), 0n);
-		}
+		const events = await getTransferEventsFromSubgraph({
+			fromAddresses: [address.toLowerCase()],
+			toAddresses: receivers,
+			tokenAddress,
+			fromBlock: globalEnv.FROM_BLOCK || 20506082,
+			logPrefix: 'getOpenSourceSentPoints',
+		});
+		const totalSentWei = events.reduce((acc, cur) => acc + BigInt(cur.value || '0'), 0n);
 		const totalSentGd = formatEther(totalSentWei);
 		const totalPoints = Math.floor(parseFloat(totalSentGd) * pointsPerGdFloat);
 		const awardedSoFar = await getEventBalance(address, OPENSOURCE_SENT_EVENT_NAME);
@@ -821,30 +961,27 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 
 export const getInviteEvents = async (address: string): Promise<string> => {
 	try {
-		const toBlock = 'latest';
-		const query = {
-			address: '0x36829D1Cda92FFF5782d5d48991620664FC857d3', //invites on celo
-			topic0: '0x6081787cd1bd02ab1576c52f03e8710d792d460e7881c3155d77d23893f3768b', //invite event topic
-			topic0_1_opr: 'and',
-			topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+		const inviteContract = '0x36829D1Cda92FFF5782d5d48991620664FC857d3'.toLowerCase();
+		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
+		if (!tokenAddress) {
+			console.warn('GOODDOLLAR missing, skipping invite points', { address });
+			return '0';
+		}
+
+		const events = await getTransferEventsFromSubgraph({
+			fromAddresses: [inviteContract],
+			toAddresses: [address.toLowerCase()],
+			tokenAddress,
 			fromBlock: globalEnv.FROM_BLOCK_INVITES || 20506082,
-			toBlock,
-			offset: 1000,
-		};
-		const events = await getExplorerEvents(address, query);
-		// if (events.length === 0) {
-		// 	return '0';
-		// }
-		// const invitesSoFar = Number(await pointsClient.getPoints(address, { event: 'validInvites' }));
+			logPrefix: 'getInviteEvents',
+		});
 		const invitesSoFar = await getEventBalance(address, 'validInvites');
 		console.log('fetched wallet invite events:', { events: events.length, address, invitesSoFar });
-		const diff = Number(globalEnv.INVITE_POINTS || 0) * events.length - invitesSoFar; // 5 points per invite
+		const diff = Number(globalEnv.INVITE_POINTS || 0) * events.length - invitesSoFar;
 		if (diff !== 0) {
-			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
 			console.log('updating stack invites points', { address, diff, invitesSoFar });
 			try {
 				await pushPointsDelta({ address, eventName: 'validInvites', points: diff });
-				// await stack.track('validInvites', { account: address, points: diff });
 			} catch (e: any) {
 				console.error('stack.so track failed (invites):', e.message, e);
 				throw e;
@@ -859,32 +996,25 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 
 const getClaims = async (address: string): Promise<string> => {
 	try {
-		const toBlock = 'latest';
-		const query = {
-			address: '0x43d72Ff17701B2DA814620735C39C620Ce0ea4A1', //ubischeme on celo
-			topic0: '0x89ed24731df6b066e4c5186901fffdba18cd9a10f07494aff900bdee260d1304', //claim event topic
-			topic0_1_opr: 'and',
-			topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+		const ubiContract = '0x43d72Ff17701B2DA814620735C39C620Ce0ea4A1'.toLowerCase();
+		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
+		if (!tokenAddress) {
+			console.warn('GOODDOLLAR missing, skipping claims points', { address });
+			return '0';
+		}
+
+		const events = await getTransferEventsFromSubgraph({
+			fromAddresses: [ubiContract],
+			toAddresses: [address.toLowerCase()],
+			tokenAddress,
 			fromBlock: globalEnv.FROM_BLOCK || 20506082,
-			toBlock,
-			offset: 1000,
-		};
-		const events = await getExplorerEvents(address, query);
-		// if (events.length === 0) {
-		// 	return '0';
-		// }
-		console.log('got claims	 events:', { address, events: events.length });
-		// const claimsSoFar = Number(
-		// 	await stack.getPoints(address, { event: 'claimed' }).catch((e) => {
-		// 		console.error('stack.so getPoints failed (claimed):', e.message, e);
-		// 		throw e;
-		// 	})
-		// );
+			logPrefix: 'getClaims',
+		});
+		console.log('got claims events:', { address, events: events.length });
 		const claimsSoFar = await getEventBalance(address, 'claimed');
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
 		const diff = events.length * Number(globalEnv.CLAIM_POINTS || 0) - claimsSoFar;
 		if (diff !== 0) {
-			// const uniqueId = address + '_' + last(events).timeStamp + '_' + diff;
 			console.log('updating stack claimed points', { address, diff, claimsSoFar });
 			try {
 				await pushPointsDelta({ address, eventName: 'claimed', points: diff });
@@ -983,7 +1113,7 @@ export default {
 				{ headers: getHeaders(), status: 403 },
 			);
 		}
-		if (await isAddressRateLimited(address, ctx)) {
+		if (process.env.NODE_ENV !== 'development' && (await isAddressRateLimited(address, ctx))) {
 			const headers = getHeaders();
 			headers.set('Retry-After', String(getRateLimitWindowSeconds()));
 			return new Response(
@@ -995,6 +1125,17 @@ export default {
 			);
 		}
 		try {
+			// shared in-memory RPC cache; persists across requests within the same Worker isolate
+			// const _rpcCache = new Map<string, string>();
+			// viemFallback = createViemFallbackClient(
+			// 	{
+			// 		getItem: (k) => _rpcCache.get(k) ?? null,
+			// 		setItem: (k, v) => {
+			// 			_rpcCache.set(k, v);
+			// 		},
+			// 	},
+			// 	{ onError: (e) => console.warn('viemFallback RPC refresh error:', e) },
+			// );
 			// stack = new StackClient({
 			// 	// Your API key
 			// 	apiKey: globalEnv.STACK_KEY,
