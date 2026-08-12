@@ -38,7 +38,7 @@ const FLOW_COUNCIL_SUBGRAPH_URL =
 const ROUND_STREAMS_PAGE_SIZE = 1000;
 const ROUND_BALLOTS_PAGE_SIZE = 1000;
 const TWO_WEEKS_SECONDS = 14 * 24 * 60 * 60;
-const ADDRESS_RATE_LIMIT_SECONDS = 60 * 60;
+const ADDRESS_RATE_LIMIT_SECONDS = 60 * 5;
 
 let globalEnv: { [key: string]: string };
 
@@ -578,7 +578,7 @@ const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: 
 				offset: 1000,
 			};
 			const events = await getExplorerEvents(tokenAddress, query);
-			console.log('getOpenSourceSentPoints events', events, { fromBlock: globalEnv.FROM_BLOCK });
+			console.log('getOpenSourceSentPoints events', events, { fromBlock: globalEnv.FROM_BLOCK, receiver });
 			totalSentWei += events.reduce((acc, cur) => acc + BigInt(cur.data || '0x0'), 0n);
 		}
 		const totalSentGd = formatEther(totalSentWei);
