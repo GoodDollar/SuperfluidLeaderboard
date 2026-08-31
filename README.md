@@ -30,10 +30,8 @@ Wallet points are sum of:
 
 ### Historical event data source
 
-- `USE_SUBGRAPH` defaults to `false`, which uses the Blockscout PRO API for the historical claim, invite, and direct open-source transfer lookups.
-- Set `USE_SUBGRAPH=true` to use the migrated `transferEvents` subgraph lookups for invite and direct open-source transfer actions. Claims always use the UBI `Claimed` event so points follow the event's `claimer`/verified root rather than the G$ payout recipient.
 - Stream-period and FLOW council vote calculations remain subgraph-based because they did not have an equivalent legacy Blockscout implementation.
-- `BLOCKSCOUT_PRO_API_KEY` is required for the default path and should be stored as a Worker secret (`wrangler secret put BLOCKSCOUT_PRO_API_KEY`). The worker uses Blockscout’s Celo PRO endpoint: `https://api.blockscout.com/v2/api?chain_id=42220`.
+- `BLOCKSCOUT_API_KEY` is required for the default path and should be stored as a Worker secret (`wrangler secret put BLOCKSCOUT_API_KEY`). The worker uses Blockscout’s Celo PRO endpoint: `https://api.blockscout.com/api?chain_id=42220`.
 - Blockscout `getLogs` is capped at 1,000 logs per request; a full result set is recovered by recursively splitting saturated block ranges rather than trusting page numbers.
 
 ### Rate limit
