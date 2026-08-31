@@ -20,18 +20,20 @@
  */
 import { isArray, first, isFunction, noop, groupBy, last, add } from 'lodash';
 import { celo } from 'viem/chains';
-import { createPublicClient, getContract, http, padHex, parseAbi, getAddress, formatEther } from 'viem';
+import { createPublicClient, getContract, http, parseAbi, getAddress, formatEther, padHex } from 'viem';
 import createClient from 'openapi-fetch';
 import { paths } from '../points-api';
+// import { createViemFallbackClient } from './viemFallbackClient';
+
+// let viemFallback: ReturnType<typeof createViemFallbackClient>;
 const MAX_DAILY_STREAM = BigInt(73000 * 1e18); //73k G$
 const MAX_STREAM_RATE = MAX_DAILY_STREAM / (24n * 60n * 60n);
-const ERC20_TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const ROUND_STREAM_EVENT_NAME = 'roundStreamed';
 const OPENSOURCE_STREAM_EVENT_NAME = 'opensourceStreamed';
 const OPENSOURCE_SENT_EVENT_NAME = 'opensourceSent';
 const ROUND_VOTE_EVENT_NAME = 'roundVotes';
 const G_DONATION_EVENT_NAMES = new Set(['streamed', ROUND_STREAM_EVENT_NAME, OPENSOURCE_STREAM_EVENT_NAME, OPENSOURCE_SENT_EVENT_NAME]);
-const ROUND_SUBGRAPH_URL = 'https://celo-mainnet.subgraph.x.superfluid.dev/';
+const SUPERFLUID_SUBGRAPH_URL = 'https://gateway.thegraph.com/api/subgraphs/id/DnAAo2aA676F8DYkcUPrRTgpH4smc1Yo7D7BnzC3ErBh';
 const FLOW_COUNCIL_SUBGRAPH_URL =
 	'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn';
 const ROUND_STREAMS_PAGE_SIZE = 1000;
@@ -207,117 +209,104 @@ const parseReceivers = (value: string | undefined): string[] => {
 	return [...new Set(receivers)];
 };
 
-const BLOCKSCOUT_PRO_API_URL = 'https://api.blockscout.com/v2/api';
-const BLOCKSCOUT_CHAIN_ID = '42220';
-const BLOCKSCOUT_PAGE_SIZE = 1000;
+const LOG_CHUNK_SIZE = 5000n;
 
-const useSubgraphForTransfers = (): boolean => globalEnv.USE_SUBGRAPH?.toLowerCase() === 'true';
+export const getExplorerEventsByApi = async (address: string, query: any): Promise<Array<any>> => {
+	const networkExplorerUrls = 'https://api.blockscout.com/42220/api';
 
-const getBlockscoutApiKey = (): string => {
-	const apiKey = globalEnv.BLOCKSCOUT_PRO_API_KEY || globalEnv.BLOCKSCOUT_API_KEY || globalEnv.ETHERSCAN_KEY;
-	if (!apiKey) {
-		throw new Error('BLOCKSCOUT_PRO_API_KEY is missing');
-	}
-	return apiKey;
-};
-
-/** Fetch all matching Celo logs from Blockscout PRO, not just its first page. */
-export const getExplorerEvents = async (address: string, query: any): Promise<Array<any>> => {
 	const params = {
 		module: 'logs',
 		action: 'getLogs',
-		chain_id: BLOCKSCOUT_CHAIN_ID,
 		address,
 		sort: 'asc',
-		offset: BLOCKSCOUT_PAGE_SIZE,
+		page: 1,
+		offset: 1000,
 		...query,
-		// The credential must always come from Worker configuration, never from the caller query.
-		apikey: getBlockscoutApiKey(),
+		apikey: globalEnv.BLOCKSCOUT_API_KEY,
 	};
 
-	let latestBlockPromise: Promise<bigint> | undefined;
-	const getLatestBlock = (): Promise<bigint> => {
-		if (latestBlockPromise) return latestBlockPromise;
-
-		const latestUrl = new URL(BLOCKSCOUT_PRO_API_URL);
-		Object.entries({
-			module: 'block',
-			action: 'eth_block_number',
-			chain_id: BLOCKSCOUT_CHAIN_ID,
-			apikey: params.apikey,
-		}).forEach(([key, value]) => latestUrl.searchParams.set(key, String(value)));
-		latestBlockPromise = retry(
-			() =>
-				fetch(latestUrl).then(async (response) => {
-					const result = await response.json();
-					if ((result as any)?.result) return BigInt((result as any).result);
-					throw new Error(`Blockscout latest block request failed (${response.status}): ${JSON.stringify(result)}`);
-				}),
-			{ n: 3, waitMillis: 500 },
-		).promise;
-		return latestBlockPromise;
-	};
-
-	const fetchRange = async (fromBlock: bigint, requestedToBlock: bigint | 'latest'): Promise<Array<any>> => {
-		const url = new URL(BLOCKSCOUT_PRO_API_URL);
-		Object.entries({
-			...params,
-			page: 1,
-			fromBlock: fromBlock.toString(),
-			toBlock: requestedToBlock.toString(),
-		}).forEach(([key, value]) => url.searchParams.set(key, String(value)));
+	const calls = networkExplorerUrls.split(',').map((networkExplorerUrl) => {
+		const url = new URL(networkExplorerUrl);
+		Object.entries(params).forEach(([k, v]) => {
+			url.searchParams.set(k, v as string);
+		});
 		const urlString = url.toString();
-		const events = await retry(
-			() =>
-				fetch(urlString)
-					.then(async (response) => {
-						const result = await response.json();
-						if (isArray((result as any)?.result)) return (result as any).result;
-						console.warn('getExplorerEvents fetch failed:', result);
-						throw new Error(`Blockscout logs request failed (${response.status}): ${JSON.stringify(result)}`);
-					})
-					.catch((e) => {
-						console.warn('getExplorerEvents fetch failed:', e.message, e, {
-							endpoint: `${url.origin}${url.pathname}`,
-							address: params.address,
-						});
-						throw e;
-					}),
-			{ n: 3, waitMillis: 500 },
-		).promise;
-
-		console.log('getExplorerEvents Blockscout range', {
-			address: params.address,
-			count: events.length,
-			fromBlock: fromBlock.toString(),
-			toBlock: requestedToBlock.toString(),
-		});
-
-		if (events.length < BLOCKSCOUT_PAGE_SIZE) return events;
-		const toBlock = requestedToBlock === 'latest' ? await getLatestBlock() : requestedToBlock;
-		if (fromBlock === toBlock) {
-			throw new Error(`Blockscout returned its ${BLOCKSCOUT_PAGE_SIZE}-log limit for a single block`);
-		}
-
-		const midpoint = fromBlock + (toBlock - fromBlock) / 2n;
-		console.warn('getExplorerEvents reached Blockscout log limit; splitting block range', {
-			fromBlock: fromBlock.toString(),
-			toBlock: toBlock.toString(),
-			midpoint: midpoint.toString(),
-		});
-		const firstHalf = await fetchRange(fromBlock, midpoint);
-		const secondHalf = await fetchRange(midpoint + 1n, toBlock);
-		return [...firstHalf, ...secondHalf];
-	};
-
-	const fromBlock = params.fromBlock && params.fromBlock !== 'latest' ? BigInt(params.fromBlock) : 0n;
-	const toBlock = params.toBlock && params.toBlock !== 'latest' ? BigInt(params.toBlock) : 'latest';
-	if (toBlock !== 'latest' && toBlock < fromBlock) return [];
-	return fetchRange(fromBlock, toBlock);
+		return () => {
+			return fetch(urlString)
+				.then((result) => result.json())
+				.then((result: any) => {
+					if (isArray(result.result)) {
+						return result.result;
+					}
+					console.warn('getExplorerEvents fetch failed:', result);
+					throw new Error(`NOTOK ${JSON.stringify(result)}`);
+				})
+				.catch((e) => {
+					console.warn('getExplorerEvents fetch failed:', e.message, e, urlString);
+					throw e;
+				});
+		};
+	});
+	return retry(() => fallback(calls) as any, { n: 3, waitMillis: 500 }).promise as any;
 };
 
-// Kept as an export for callers that used the migration-era name.
-export const getExplorerEventsByApi = getExplorerEvents;
+// export const getExplorerEventsByRpc = async (address: string, query: any): Promise<Array<any>> => {
+// 	const client = await viemFallback.createPublicClient({
+// 		chain: celo,
+// 		fallbackRpcs: globalEnv.CELO_RPC ? [globalEnv.CELO_RPC] : [],
+// 		transport: http('https://celo-mainnet.gateway.tatum.io', {
+// 			fetchOptions: {
+// 				headers: {
+// 					'x-api-key': 't-67d180a7d15a0001449dc8dd-e1d61b9f95594134ab0ad77d',
+// 				},
+// 			},
+// 		}),
+// 	});
+
+// 	const contractAddress = (query.address || address) as `0x${string}`;
+
+// 	// build topics array, preserving null gaps for missing intermediate topics
+// 	const topics: (`0x${string}` | null)[] = [];
+// 	if (query.topic0) topics.push(query.topic0 as `0x${string}`);
+// 	if (query.topic1 || query.topic2) topics.push((query.topic1 ?? null) as `0x${string}` | null);
+// 	if (query.topic2) topics.push(query.topic2 as `0x${string}`);
+
+// 	const latestBlock = await client.getBlockNumber();
+// 	const fromBlock = query.fromBlock ? BigInt(query.fromBlock) : 0n;
+// 	const toBlock = !query.toBlock || query.toBlock === 'latest' ? latestBlock : BigInt(query.toBlock);
+
+// 	const chunks: [bigint, bigint][] = [];
+// 	for (let start = fromBlock; start <= toBlock; start += LOG_CHUNK_SIZE) {
+// 		const end = start + LOG_CHUNK_SIZE - 1n < toBlock ? start + LOG_CHUNK_SIZE - 1n : toBlock;
+// 		chunks.push([start, end]);
+// 	}
+// 	// chunks.push([fromBlock, toBlock]);
+
+// 	const CONCURRENCY = 20;
+// 	const allLogs: any[] = [];
+// 	for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+// 		const batch = chunks.slice(i, i + CONCURRENCY);
+// 		console.log(`Fetching logs for ${contractAddress} from ${batch[0][0]} to ${last(batch)?.[1]} (chunk ${i + 1} of ${chunks.length})`);
+// 		const results = await Promise.all(
+// 			batch.map(
+// 				([start, end]) =>
+// 					retry(
+// 						() =>
+// 							(client.getLogs as (args: object) => Promise<any[]>)({
+// 								address: contractAddress,
+// 								topics,
+// 								fromBlock: start,
+// 								toBlock: end,
+// 							}),
+// 						{ n: 3, waitMillis: 500 },
+// 					).promise,
+// 			),
+// 		);
+// 		for (const logs of results) allLogs.push(...logs);
+// 	}
+
+// 	return allLogs;
+// };
 
 const topWallet = async (address: string, clientIp: string) => {
 	try {
@@ -434,8 +423,8 @@ const getStreamedToReceiverWei = async ({
 	while (hasMore) {
 		const result = await retry(
 			() =>
-				fetch(ROUND_SUBGRAPH_URL, {
-					headers: { 'content-type': 'application/json' },
+				fetch(SUPERFLUID_SUBGRAPH_URL, {
+					headers: { 'content-type': 'application/json', Authorization: `Bearer ${globalEnv.SUBGRAPH_KEY}` },
 					method: 'POST',
 					body: JSON.stringify({
 						query,
@@ -521,7 +510,7 @@ const getTransferEventsFromSubgraph = async ({
 		return [];
 	}
 
-	const parsedSubgraphUrl = new URL(ROUND_SUBGRAPH_URL);
+	const parsedSubgraphUrl = new URL(SUPERFLUID_SUBGRAPH_URL);
 
 	const query = `
 	query TransferEventsPage($token: Bytes!, $froms: [String!]!, $tos: [String!]!, $fromBlock: BigInt!, $first: Int!, $skip: Int!) {
@@ -597,58 +586,43 @@ const getTransferEventsFromSubgraph = async ({
 	return allEvents;
 };
 
-const getTransferEvents = async ({
-	fromAddresses,
-	toAddresses,
-	tokenAddress,
-	fromBlock,
-	logPrefix,
-}: {
-	fromAddresses: string[];
-	toAddresses: string[];
-	tokenAddress: string;
-	fromBlock: string | number;
-	logPrefix: string;
-}): Promise<Array<any>> => {
-	if (useSubgraphForTransfers()) {
-		return getTransferEventsFromSubgraph({ fromAddresses, toAddresses, tokenAddress, fromBlock, logPrefix });
-	}
-
-	const events: Array<any> = [];
-	const normalizedToken = tokenAddress.toLowerCase();
-	const normalizedFrom = fromAddresses.map((from) => from.toLowerCase());
-	const normalizedTo = toAddresses.map((to) => to.toLowerCase());
-
-	for (const from of normalizedFrom) {
-		for (const to of normalizedTo) {
-			const query = {
-				address: normalizedToken,
-				topic0: ERC20_TRANSFER_TOPIC,
+const getTransferEventsWithFallback = async (tokenAddress: string, fromAddress: string, toAddresses: Array<string>, fromBlock: BigInt) => {
+	let events;
+	try {
+		for (const toAddress of toAddresses) {
+			const toevents = await getExplorerEventsByApi(tokenAddress, {
+				topic0: '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef',
 				topic0_1_opr: 'and',
 				topic0_2_opr: 'and',
 				topic1_2_opr: 'and',
-				topic1: padHex(from as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
-				topic2: padHex(to as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+				topic1: padHex(fromAddress as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
+				topic2: padHex(toAddress as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
 				fromBlock,
 				toBlock: 'latest',
-			};
-			const result = await getExplorerEvents(normalizedToken, query);
-			events.push(...result);
-			console.log(`${logPrefix} Blockscout transfer events`, {
-				from,
-				to,
-				count: result.length,
-				fromBlock: query.fromBlock,
 			});
+			console.log('got transfer events from explorer:', { fromAddress, toAddress, events: toevents.length });
+			if (!events) {
+				events = toevents;
+			} else {
+				events.push(...toevents);
+			}
 		}
+	} catch (e: any) {
+		console.warn('get transfer events explorer fetch failed:', { fromAddress, toAddresses }, e.message, e);
+		events = undefined;
 	}
-
+	//fallback to subgraph if explorer fails
+	if (!events) {
+		events = await getTransferEventsFromSubgraph({
+			fromAddresses: [fromAddress.toLowerCase()],
+			toAddresses,
+			tokenAddress,
+			fromBlock: globalEnv.FROM_BLOCK || 20506082,
+			logPrefix: 'getClaims',
+		});
+		console.log('got transfer events from subgraph:', { fromAddress, toAddresses, events: events.length });
+	}
 	return events;
-};
-
-const getTransferEventValueWei = (event: any): bigint => {
-	const value = event?.value ?? event?.data ?? '0';
-	return BigInt(value || '0');
 };
 
 const getStreamedToReceiverPoints = async ({
@@ -786,15 +760,16 @@ const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: 
 			});
 			return { totalSentGd: '0', awardedPoints: '0' };
 		}
-
-		const events = await getTransferEvents({
-			fromAddresses: [address.toLowerCase()],
-			toAddresses: receivers,
-			tokenAddress,
-			fromBlock: globalEnv.FROM_BLOCK || 20506082,
-			logPrefix: 'getOpenSourceSentPoints',
-		});
-		const totalSentWei = events.reduce((acc, cur) => acc + getTransferEventValueWei(cur), 0n);
+		const events = await getTransferEventsWithFallback(tokenAddress, address, receivers, BigInt(globalEnv.FROM_BLOCK || 20506082));
+		// const events = await getTransferEventsFromSubgraph({
+		// 	fromAddresses: [address.toLowerCase()],
+		// 	toAddresses: receivers,
+		// 	tokenAddress,
+		// 	fromBlock: globalEnv.FROM_BLOCK || 20506082,
+		// 	logPrefix: 'getOpenSourceSentPoints',
+		// });
+		console.log('getOpenSourceSentPoints fetched events', { address, receivers, events: events.length });
+		const totalSentWei = events.reduce((acc, cur) => acc + BigInt(cur.value || '0'), 0n);
 		const totalSentGd = formatEther(totalSentWei);
 		const totalPoints = Math.floor(parseFloat(totalSentGd) * pointsPerGdFloat);
 		const awardedSoFar = await getEventBalance(address, OPENSOURCE_SENT_EVENT_NAME);
@@ -1041,22 +1016,19 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 			return '0';
 		}
 
-		const events = useSubgraphForTransfers()
-			? await getTransferEvents({
-					fromAddresses: [inviteContract],
-					toAddresses: [address.toLowerCase()],
-					tokenAddress,
-					fromBlock: globalEnv.FROM_BLOCK_INVITES || 20506082,
-					logPrefix: 'getInviteEvents',
-				})
-			: await getExplorerEvents(address, {
-					address: inviteContract,
-					topic0: '0x6081787cd1bd02ab1576c52f03e8710d792d460e7881c3155d77d23893f3768b',
-					topic0_1_opr: 'and',
-					topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
-					fromBlock: globalEnv.FROM_BLOCK_INVITES || 20506082,
-					toBlock: 'latest',
-				});
+		const events = await getTransferEventsWithFallback(
+			tokenAddress,
+			inviteContract,
+			[address.toLowerCase()],
+			BigInt(globalEnv.FROM_BLOCK_INVITES || 20506082),
+		);
+		// const events = await getTransferEventsFromSubgraph({
+		// 	fromAddresses: [inviteContract],
+		// 	toAddresses: [address.toLowerCase()],
+		// 	tokenAddress,
+		// 	fromBlock: globalEnv.FROM_BLOCK_INVITES || 20506082,
+		// 	logPrefix: 'getInviteEvents',
+		// });
 		const invitesSoFar = await getEventBalance(address, 'validInvites');
 		console.log('fetched wallet invite events:', { events: events.length, address, invitesSoFar });
 		const diff = Number(globalEnv.INVITE_POINTS || 0) * events.length - invitesSoFar;
@@ -1079,18 +1051,18 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 const getClaims = async (address: string): Promise<string> => {
 	try {
 		const ubiContract = '0x43d72Ff17701B2DA814620735C39C620Ce0ea4A1'.toLowerCase();
-		// Claim ownership is defined by UBIClaimed.claimer (the verified root),
-		// not by the wallet that receives the G$ transfer. Keep this event-based
-		// lookup even when transfer-based actions use the subgraph.
-		const events = await getExplorerEvents(address, {
-			address: ubiContract,
-			topic0: '0x89ed24731df6b066e4c5186901fffdba18cd9a10f07494aff900bdee260d1304',
-			topic0_1_opr: 'and',
-			topic1: padHex(address as `0x${string}`, { dir: 'left', size: 32 }).toLowerCase(),
-			fromBlock: globalEnv.FROM_BLOCK || 20506082,
-			toBlock: 'latest',
-		});
-		console.log('got claims events:', { address, events: events.length });
+		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
+		if (!tokenAddress) {
+			console.warn('GOODDOLLAR missing, skipping claims points', { address });
+			return '0';
+		}
+
+		const events = await getTransferEventsWithFallback(
+			tokenAddress,
+			ubiContract,
+			[address.toLowerCase()],
+			BigInt(globalEnv.FROM_BLOCK || 20506082),
+		);
 		const claimsSoFar = await getEventBalance(address, 'claimed');
 		console.log('fetched wallet claim events:', { events: events.length, address, claimsSoFar });
 		const diff = events.length * Number(globalEnv.CLAIM_POINTS || 0) - claimsSoFar;
@@ -1174,7 +1146,6 @@ export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		if (request.method != 'GET') throw new Error('unsupported request type');
 		globalEnv = env as any;
-		const isDevelopment = globalEnv.NODE_ENV?.toLowerCase() === 'development';
 		const clientIp = request.headers.get('CF-Connecting-IP');
 		let url = new URL(request.url);
 		const address = getAddress(url.searchParams.get('address') as any);
@@ -1182,7 +1153,7 @@ export default {
 		if (!address) {
 			throw new Error('missing wallet address');
 		}
-		if (url.searchParams.get('reset') === 'true' && isDevelopment) {
+		if (url.searchParams.get('reset') === 'true' && process.env.NODE_ENV === 'development') {
 			await resetPoints(address);
 		}
 		if (EXCLUDED_ADDRESSES.has(address.toLowerCase())) {
@@ -1194,7 +1165,7 @@ export default {
 				{ headers: getHeaders(), status: 403 },
 			);
 		}
-		if (!isDevelopment && (await isAddressRateLimited(address, ctx))) {
+		if (process.env.NODE_ENV !== 'development' && (await isAddressRateLimited(address, ctx))) {
 			const headers = getHeaders();
 			headers.set('Retry-After', String(getRateLimitWindowSeconds()));
 			return new Response(
@@ -1206,6 +1177,17 @@ export default {
 			);
 		}
 		try {
+			// shared in-memory RPC cache; persists across requests within the same Worker isolate
+			// const _rpcCache = new Map<string, string>();
+			// viemFallback = createViemFallbackClient(
+			// 	{
+			// 		getItem: (k) => _rpcCache.get(k) ?? null,
+			// 		setItem: (k, v) => {
+			// 			_rpcCache.set(k, v);
+			// 		},
+			// 	},
+			// 	{ onError: (e) => console.warn('viemFallback RPC refresh error:', e) },
+			// );
 			// stack = new StackClient({
 			// 	// Your API key
 			// 	apiKey: globalEnv.STACK_KEY,
@@ -1226,7 +1208,7 @@ export default {
 				{ headers: getHeaders(), status: 200 },
 			);
 		} catch (e: any) {
-			console.error('superfluid request failed', { address, error: e.message, e });
+			console.error('superfluid request failed', { address, error: e.message, e, globalEnv });
 			throw e;
 		}
 	},
