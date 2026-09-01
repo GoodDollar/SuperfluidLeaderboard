@@ -212,6 +212,13 @@ const parseReceivers = (value: string | undefined): string[] => {
 
 const LOG_CHUNK_SIZE = 5000n;
 
+/**
+ * Blockscout's logs endpoint returns the ERC-20 Transfer amount in `data`,
+ * while the Subgraph transferEvents shape calls the same field `value`.
+ * Keep the amount extraction compatible with both sources.
+ */
+export const getTransferEventValue = (event: { value?: string; data?: string }): string => event.value ?? event.data ?? '0';
+
 export const getExplorerEventsByApi = async (address: string, query: any): Promise<Array<any>> => {
 	const networkExplorerUrls = 'https://api.blockscout.com/42220/api';
 
@@ -776,7 +783,7 @@ const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: 
 		// 	logPrefix: 'getOpenSourceSentPoints',
 		// });
 		console.log('getOpenSourceSentPoints fetched events', { address, receivers, events: events.length });
-		const totalSentWei = events.reduce((acc, cur) => acc + BigInt(cur.value || '0'), 0n);
+		const totalSentWei = events.reduce((acc, cur) => acc + BigInt(getTransferEventValue(cur)), 0n);
 		const totalSentGd = formatEther(totalSentWei);
 		const totalPoints = Math.floor(parseFloat(totalSentGd) * pointsPerGdFloat);
 		const awardedSoFar = await getEventBalance(address, OPENSOURCE_SENT_EVENT_NAME);
