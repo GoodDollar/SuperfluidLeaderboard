@@ -36,6 +36,8 @@ INVITE_POINTS = 10
 VOTE_POINTS = 5
 ROUND_COUNCIL = '0x582e3314d4ef56c18930acb10bb64313525e7820'
 FLOW_COUNCIL_SUBGRAPH_URL = 'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn'
+## control if points deduction is enabled usually for fixing incorrect point allocations
+POINTS_DEDUCTION_ENABLED = false
 #SUBGRAPH_URL = ''
 #CELOSCAN_KEY
 

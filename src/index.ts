@@ -337,6 +337,9 @@ const pushPointsDelta = async ({ address, eventName, points }: { address: string
 	if (points === 0) {
 		return;
 	}
+	if (points < 0 && !globalEnv.POINTS_DEDUCTION_ENABLED) {
+		return;
+	}
 	const campaignId = getCampaignIdForEvent(eventName);
 	const campaignApiKey = getCampaignApiKeyForEvent(eventName);
 	const result = await pointsClient.POST('/points/push', {
