@@ -236,6 +236,9 @@ export const getExplorerEventsByApi = async (address: string, query: any): Promi
 				.then((result) => result.json())
 				.then((result: any) => {
 					if (isArray(result.result)) {
+						result.result.forEach((event: any) => {
+							event.value = BigInt(event.data);
+						});
 						return result.result;
 					}
 					console.warn('getExplorerEvents fetch failed:', result);
