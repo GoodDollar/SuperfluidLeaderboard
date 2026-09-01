@@ -33,7 +33,8 @@ const OPENSOURCE_STREAM_EVENT_NAME = 'opensourceStreamed';
 const OPENSOURCE_SENT_EVENT_NAME = 'opensourceSent';
 const ROUND_VOTE_EVENT_NAME = 'roundVotes';
 const G_DONATION_EVENT_NAMES = new Set(['streamed', ROUND_STREAM_EVENT_NAME, OPENSOURCE_STREAM_EVENT_NAME, OPENSOURCE_SENT_EVENT_NAME]);
-const SUPERFLUID_SUBGRAPH_URL = 'https://gateway.thegraph.com/api/subgraphs/id/DnAAo2aA676F8DYkcUPrRTgpH4smc1Yo7D7BnzC3ErBh';
+// const SUPERFLUID_SUBGRAPH_URL = 'https://gateway.thegraph.com/api/subgraphs/id/DnAAo2aA676F8DYkcUPrRTgpH4smc1Yo7D7BnzC3ErBh';
+const SUPERFLUID_SUBGRAPH_URL = 'https://celo-mainnet.subgraph.x.superfluid.dev/';
 const FLOW_COUNCIL_SUBGRAPH_URL =
 	'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn';
 const ROUND_STREAMS_PAGE_SIZE = 1000;
@@ -865,7 +866,7 @@ const getRoundVotesPoints = async (address: string): Promise<{ totalVotes: strin
 							console.warn('getRoundVotesPoints fetch failed:', e.message, e);
 							throw e;
 						}),
-				{ n: 3, waitMillis: 1000 },
+				{ n: 3, waitMillis: 3000 },
 			).promise;
 
 			for (const ballot of ballots as Array<{ createdAtTimestamp: string }>) {
