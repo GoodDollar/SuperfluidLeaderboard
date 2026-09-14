@@ -51,6 +51,11 @@ OPENSOURCE_SENT_POINTS_PER_GD = 0.00125
 CLAIM_POINTS = 1
 INVITE_POINTS = 10
 USE_SUBGRAPH = 'false'
+## control if points deduction is enabled usually for fixing incorrect point allocations
+POINTS_DEDUCTION_ENABLED = false
+#SUBGRAPH_URL = ''
+#CELOSCAN_KEY
+
 
 # Automatically place your workloads in an optimal location to minimize latency.
 # If you are running back-end logic in a Worker, running it closer to your back-end infrastructure
