@@ -3,6 +3,8 @@ name = "superfluid-airdrop"
 main = "src/index.ts"
 compatibility_date = "2024-12-24"
 compatibility_flags = ["nodejs_compat"]
+# Preserve Worker variables managed from the Cloudflare dashboard on deploy.
+keep_vars = true
 
 # Workers Logs
 # Docs: https://developers.cloudflare.com/workers/observability/logs/workers-logs/
@@ -10,18 +12,33 @@ compatibility_flags = ["nodejs_compat"]
 [observability]
 enabled = true
 
+[secrets]
+required = [
+  "BLOCKSCOUT_PRO_API_KEY",
+  "STACK_KEY",
+  "STACK_G_DONATION_KEY",
+  "SUBGRAPH_KEY",
+  "SUBGRAPH_URL"
+]
 [vars]
+CELO_RPC = 'https://forno.celo.org'
+# SUBGRAPH_URL = 'https://api.studio.thegraph.com/query/59211/goodcollective/dev-v1.0.13/'
+#IDENTITY=0xF25fA0D4896271228193E782831F6f3CFCcF169C
 IDENTITY = '0xC361A6E67822a0EDc17D899227dd9FC50BD62F42'
 GOODSERVER_URL = 'https://goodserver.gooddollar.org/verify/topwallet'
-CELO_RPC = "https://forno.celo.org"
-# season 6 params
+#season 6
 STACK_POINT_SYSTEM_ID = 606
-# Optional: campaign id used only for G$ donation/streaming events
-# (streamed, roundStreamed, opensourceStreamed, opensourceSent)
+# Optional: separate campaign for G$ donation/streaming events
 STACK_G_DONATION_POINT_SYSTEM_ID = 614
-# Optional: API key for the donation campaign. Falls back to STACK_KEY when not set.
-# STACK_G_DONATION_KEY = 'replace-with-donation-campaign-api-key'
+# Optional: separate API key for G$ donation/streaming campaign
+# STACK_G_DONATION_KEY=sfp_xxx
 ADDRESS_RATE_LIMIT_SECONDS = 3600
+# Comma-separated event names whose points allocation is paused. Empty means none.
+# Use '*' to pause all actions.
+# PAUSED_ACTIONS is managed in the Cloudflare Worker dashboard.
+VOTE_POINTS = 5
+ROUND_COUNCIL = '0x582e3314d4ef56c18930acb10bb64313525e7820'
+FLOW_COUNCIL_SUBGRAPH_URL = 'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn'
 FROM_BLOCK = 71000000
 FROM_BLOCK_INVITES = 71000000
 FROM_TS = 1782900758
@@ -33,12 +50,7 @@ OPENSOURCE_STREAM_POINTS_PER_GD = 0.00250
 OPENSOURCE_SENT_POINTS_PER_GD = 0.00125
 CLAIM_POINTS = 1
 INVITE_POINTS = 10
-VOTE_POINTS = 5
-ROUND_COUNCIL = '0x582e3314d4ef56c18930acb10bb64313525e7820'
-FLOW_COUNCIL_SUBGRAPH_URL = 'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn'
-#SUBGRAPH_URL = ''
-#CELOSCAN_KEY
-
+USE_SUBGRAPH = 'false'
 
 # Automatically place your workloads in an optimal location to minimize latency.
 # If you are running back-end logic in a Worker, running it closer to your back-end infrastructure

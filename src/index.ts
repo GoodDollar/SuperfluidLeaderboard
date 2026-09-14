@@ -47,6 +47,27 @@ let globalEnv: { [key: string]: string };
 const pointsClient = createClient<paths>({ baseUrl: 'https://cms.superfluid.pro' });
 // API key passed per-request for push operations
 
+const isActionPaused = (eventName: string): boolean => {
+	const pausedActions = new Set(
+		(globalEnv.PAUSED_ACTIONS || '')
+			.split(',')
+			.map((action) => action.trim())
+			.filter(Boolean),
+	);
+
+	return pausedActions.has('*') || pausedActions.has(eventName);
+};
+
+const getPausedEventBalance = async (address: string, eventName: string): Promise<number | undefined> => {
+	if (!isActionPaused(eventName)) {
+		return undefined;
+	}
+
+	const awardedSoFar = await getEventBalance(address, eventName);
+	console.log('points allocation paused', { address, eventName, awardedSoFar });
+	return awardedSoFar;
+};
+
 const getCampaignIdForEvent = (eventName: string): number => {
 	const defaultCampaignId = Number(globalEnv.STACK_POINT_SYSTEM_ID);
 	if (Number.isNaN(defaultCampaignId)) {
@@ -643,6 +664,11 @@ const getStreamedToReceiverPoints = async ({
 	eventName: string;
 	logPrefix: string;
 }): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
+	const pausedPoints = await getPausedEventBalance(address, eventName);
+	if (pausedPoints !== undefined) {
+		return { totalStreamedGd: '0', awardedPoints: String(pausedPoints) };
+	}
+
 	const totalStreamedWei = await getStreamedToReceiverWei({
 		address,
 		receivers: [receiver],
@@ -703,6 +729,11 @@ const getRoundSplitterStreamPoints = async (address: string): Promise<{ totalStr
 
 const getOpenSourcePoolStreamPoints = async (address: string): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
 	try {
+		const pausedPoints = await getPausedEventBalance(address, OPENSOURCE_STREAM_EVENT_NAME);
+		if (pausedPoints !== undefined) {
+			return { totalStreamedGd: '0', awardedPoints: String(pausedPoints) };
+		}
+
 		const receivers = parseReceivers(globalEnv.OPENSOURCE_POOLS);
 		const token = globalEnv.GOODDOLLAR?.toLowerCase();
 		const pointsPerGdFloat = parseFloat(globalEnv.OPENSOURCE_STREAM_POINTS_PER_GD || '0');
@@ -752,6 +783,11 @@ const getOpenSourcePoolStreamPoints = async (address: string): Promise<{ totalSt
 
 const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: string; awardedPoints: string }> => {
 	try {
+		const pausedPoints = await getPausedEventBalance(address, OPENSOURCE_SENT_EVENT_NAME);
+		if (pausedPoints !== undefined) {
+			return { totalSentGd: '0', awardedPoints: String(pausedPoints) };
+		}
+
 		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
 		const receivers = parseReceivers(globalEnv.OPENSOURCE_POOLS);
 		const pointsPerGdFloat = parseFloat(globalEnv.OPENSOURCE_SENT_POINTS_PER_GD || '0');
@@ -817,6 +853,11 @@ const getCountedRoundVotes = (timestamps: number[]): number => {
 
 const getRoundVotesPoints = async (address: string): Promise<{ totalVotes: string; countedVotes: string; awardedPoints: string }> => {
 	try {
+		const pausedPoints = await getPausedEventBalance(address, ROUND_VOTE_EVENT_NAME);
+		if (pausedPoints !== undefined) {
+			return { totalVotes: '0', countedVotes: '0', awardedPoints: String(pausedPoints) };
+		}
+
 		const roundCouncil = globalEnv.ROUND_COUNCIL?.toLowerCase();
 		const pointsPerVote = Number(globalEnv.VOTE_POINTS || 0);
 		if (!roundCouncil) {
@@ -906,6 +947,11 @@ const getRoundVotesPoints = async (address: string): Promise<{ totalVotes: strin
 };
 
 const getGoodCollectiveStreams = async (address: string): Promise<string> => {
+	const pausedPoints = await getPausedEventBalance(address, 'streamed');
+	if (pausedPoints !== undefined) {
+		return String(pausedPoints);
+	}
+
 	const subgraphUrl = globalEnv.SUBGRAPH_URL;
 	const query = `
 	{
@@ -1012,6 +1058,11 @@ const getGoodCollectiveStreams = async (address: string): Promise<string> => {
 
 export const getInviteEvents = async (address: string): Promise<string> => {
 	try {
+		const pausedPoints = await getPausedEventBalance(address, 'validInvites');
+		if (pausedPoints !== undefined) {
+			return '0';
+		}
+
 		const inviteContract = '0x36829D1Cda92FFF5782d5d48991620664FC857d3'.toLowerCase();
 		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
 		if (!tokenAddress) {
@@ -1053,6 +1104,11 @@ export const getInviteEvents = async (address: string): Promise<string> => {
 
 const getClaims = async (address: string): Promise<string> => {
 	try {
+		const pausedPoints = await getPausedEventBalance(address, 'claimed');
+		if (pausedPoints !== undefined) {
+			return '0';
+		}
+
 		const ubiContract = '0x43d72Ff17701B2DA814620735C39C620Ce0ea4A1'.toLowerCase();
 		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
 		if (!tokenAddress) {

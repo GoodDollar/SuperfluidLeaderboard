@@ -28,6 +28,18 @@ Wallet points are sum of:
 - `STACK_G_DONATION_KEY` is optional and, when set, is used for G$ donation/streaming points API calls.
 - If `STACK_G_DONATION_KEY` is not set, donation/streaming calls fall back to `STACK_KEY`.
 
+### Pausing point allocation
+
+`PAUSED_ACTIONS` is the single source of truth for freezing point allocation. Any listed action returns its existing CMS balance, skips activity-event fetching, and does not receive new points. It is a comma-separated list of event names. An empty or unset value leaves all actions enabled.
+
+For example, to pause claims and votes while continuing invites and streaming:
+
+```toml
+PAUSED_ACTIONS = 'claimed,roundVotes'
+```
+
+Whitespace around commas is ignored. Use `PAUSED_ACTIONS = '*'` to pause all actions. Do not set an action's point rate to `0` as a pause mechanism; the reconciliation logic would interpret that as a negative adjustment and remove previously awarded points.
+
 ### Historical event data source
 
 - Stream-period and FLOW council vote calculations remain subgraph-based because they did not have an equivalent legacy Blockscout implementation.
