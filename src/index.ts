@@ -282,7 +282,7 @@ export const getExplorerEventsByApi = async (address: string, query: any): Promi
 // 		transport: http('https://celo-mainnet.gateway.tatum.io', {
 // 			fetchOptions: {
 // 				headers: {
-// 					'x-api-key': 't-67d180a7d15a0001449dc8dd-e1d61b9f95594134ab0ad77d',
+// 					'x-api-key': '',
 // 				},
 // 			},
 // 		}),
