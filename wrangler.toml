@@ -14,11 +14,11 @@ enabled = true
 
 [secrets]
 required = [
-  "BLOCKSCOUT_PRO_API_KEY",
+  "BLOCKSCOUT_API_KEY",
   "STACK_KEY",
   "STACK_G_DONATION_KEY",
   "SUBGRAPH_KEY",
-  "SUBGRAPH_URL"
+  "SUBGRAPH_URL",
 ]
 [vars]
 CELO_RPC = 'https://forno.celo.org'
@@ -26,30 +26,33 @@ CELO_RPC = 'https://forno.celo.org'
 #IDENTITY=0xF25fA0D4896271228193E782831F6f3CFCcF169C
 IDENTITY = '0xC361A6E67822a0EDc17D899227dd9FC50BD62F42'
 GOODSERVER_URL = 'https://goodserver.gooddollar.org/verify/topwallet'
-#season 6
-STACK_POINT_SYSTEM_ID = 606
-# Optional: separate campaign for G$ donation/streaming events
-STACK_G_DONATION_POINT_SYSTEM_ID = 614
+#season 7 actions
+STACK_POINT_SYSTEM_ID = 701
+# Optional: separate campaign for G$ ecosystem actions
+STACK_G_DONATION_POINT_SYSTEM_ID = 710
 # Optional: separate API key for G$ donation/streaming campaign
 # STACK_G_DONATION_KEY=sfp_xxx
 ADDRESS_RATE_LIMIT_SECONDS = 3600
 # Comma-separated event names whose points allocation is paused. Empty means none.
 # Use '*' to pause all actions.
 # PAUSED_ACTIONS is managed in the Cloudflare Worker dashboard.
-VOTE_POINTS = 5
-ROUND_COUNCIL = '0x582e3314d4ef56c18930acb10bb64313525e7820'
 FLOW_COUNCIL_SUBGRAPH_URL = 'https://api.goldsky.com/api/public/project_cmbkdj2bd7cr601uwafoe4u3y/subgraphs/flow-council-celo/v0.4.2/gn'
-FROM_BLOCK = 71000000
-FROM_BLOCK_INVITES = 71000000
-FROM_TS = 1782900758
+FROM_BLOCK = 81849000
+FROM_BLOCK_INVITES = 81849000
+FROM_TS = 1793749758
 GOODDOLLAR = '0x62B8B11039FcfE5aB0C56E502b1C372A3d2a9c7A'
-ROUND_SPLITTER = '0xf4dfaabbc75bd9dbd31499236e5c06eba0d3dab8'
+ROUND_SPLITTER = '0xBbce40Ed7773D1b6a9258BDabC42698f377b785F'
+ROUND_COUNCIL = '0x889e0aADaA3F8B28A794ef70dA147827C620a590'
 OPENSOURCE_POOLS = '0x3764607a0a721981780b798a02c2b1691d6baa39,0xd20a0c8f6ec1026a1960c6f0f4a6df1a381d9938,0xbd9f40cc8faef45bdc1768304ed8d60468d2bec7'
-ROUND_POINTS_PER_GD = 0.00250
-OPENSOURCE_STREAM_POINTS_PER_GD = 0.00250
-OPENSOURCE_SENT_POINTS_PER_GD = 0.00125
+AICREDITS_POOLS = '0x4Dd0136b9aabD5823cf0F65d89e8fB882C660885'
+ROUND_POINTS_PER_GD = 0.00225
+OPENSOURCE_STREAM_POINTS_PER_GD = 0.00225
+OPENSOURCE_SENT_POINTS_PER_GD = 0.00117
+AICREDITS_STREAM_POINTS_PER_GD = 0.00225
+AICREDITS_SENT_POINTS_PER_GD = 0.00117
 CLAIM_POINTS = 1
 INVITE_POINTS = 10
+VOTE_POINTS = 5
 USE_SUBGRAPH = 'false'
 ## control if points deduction is enabled usually for fixing incorrect point allocations
 POINTS_DEDUCTION_ENABLED = false

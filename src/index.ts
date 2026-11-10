@@ -29,10 +29,20 @@ import { paths } from '../points-api';
 const MAX_DAILY_STREAM = BigInt(73000 * 1e18); //73k G$
 const MAX_STREAM_RATE = MAX_DAILY_STREAM / (24n * 60n * 60n);
 const ROUND_STREAM_EVENT_NAME = 'roundStreamed';
+const AICREDITS_STREAM_EVENT_NAME = 'aiCreditsStreamed';
+const AICREDITS_SENT_EVENT_NAME = 'aiCreditsSent';
 const OPENSOURCE_STREAM_EVENT_NAME = 'opensourceStreamed';
 const OPENSOURCE_SENT_EVENT_NAME = 'opensourceSent';
 const ROUND_VOTE_EVENT_NAME = 'roundVotes';
-const G_DONATION_EVENT_NAMES = new Set(['streamed', ROUND_STREAM_EVENT_NAME, OPENSOURCE_STREAM_EVENT_NAME, OPENSOURCE_SENT_EVENT_NAME]);
+const ECOSYSTEM_EVENTS = new Set([
+	'streamed',
+	ROUND_STREAM_EVENT_NAME,
+	OPENSOURCE_STREAM_EVENT_NAME,
+	OPENSOURCE_SENT_EVENT_NAME,
+	AICREDITS_STREAM_EVENT_NAME,
+	AICREDITS_SENT_EVENT_NAME,
+]);
+const ACTION_EVENTS = new Set(['claimed', 'validInvites', ROUND_VOTE_EVENT_NAME]);
 // const SUPERFLUID_SUBGRAPH_URL = 'https://gateway.thegraph.com/api/subgraphs/id/DnAAo2aA676F8DYkcUPrRTgpH4smc1Yo7D7BnzC3ErBh';
 const SUPERFLUID_SUBGRAPH_URL = 'https://celo-mainnet.subgraph.x.superfluid.dev/';
 const FLOW_COUNCIL_SUBGRAPH_URL =
@@ -70,26 +80,17 @@ const getPausedEventBalance = async (address: string, eventName: string): Promis
 };
 
 const getCampaignIdForEvent = (eventName: string): number => {
-	const defaultCampaignId = Number(globalEnv.STACK_POINT_SYSTEM_ID);
-	if (Number.isNaN(defaultCampaignId)) {
-		throw new Error('STACK_POINT_SYSTEM_ID is missing or invalid');
+	const actionsCampaignId = Number(globalEnv.STACK_POINT_SYSTEM_ID);
+	const ecosystemCampaignId = Number(globalEnv.STACK_G_DONATION_POINT_SYSTEM_ID);
+
+	if (ECOSYSTEM_EVENTS.has(eventName)) {
+		return ecosystemCampaignId;
+	}
+	if (ACTION_EVENTS.has(eventName)) {
+		return actionsCampaignId;
 	}
 
-	if (!G_DONATION_EVENT_NAMES.has(eventName)) {
-		return defaultCampaignId;
-	}
-
-	const gdCampaignIdRaw = globalEnv.STACK_G_DONATION_POINT_SYSTEM_ID;
-	if (!gdCampaignIdRaw) {
-		return defaultCampaignId;
-	}
-
-	const gdCampaignId = Number(gdCampaignIdRaw);
-	if (Number.isNaN(gdCampaignId)) {
-		throw new Error('STACK_G_DONATION_POINT_SYSTEM_ID is invalid');
-	}
-
-	return gdCampaignId;
+	throw new Error(`No campaign ID found for event: ${eventName}`);
 };
 
 const getCampaignApiKeyForEvent = (eventName: string): string => {
@@ -98,7 +99,7 @@ const getCampaignApiKeyForEvent = (eventName: string): string => {
 		throw new Error('STACK_KEY is missing');
 	}
 
-	if (!G_DONATION_EVENT_NAMES.has(eventName)) {
+	if (!ECOSYSTEM_EVENTS.has(eventName)) {
 		return defaultApiKey;
 	}
 
@@ -785,6 +786,112 @@ const getOpenSourcePoolStreamPoints = async (address: string): Promise<{ totalSt
 	}
 };
 
+const getAICreditsStreamPoints = async (address: string): Promise<{ totalStreamedGd: string; awardedPoints: string }> => {
+	try {
+		const pausedPoints = await getPausedEventBalance(address, AICREDITS_STREAM_EVENT_NAME);
+		if (pausedPoints !== undefined) {
+			return { totalStreamedGd: '0', awardedPoints: String(pausedPoints) };
+		}
+
+		const receivers = parseReceivers(globalEnv.AICREDITS_POOLS);
+		const token = globalEnv.GOODDOLLAR?.toLowerCase();
+		const pointsPerGdFloat = parseFloat(globalEnv.AICREDITS_STREAM_POINTS_PER_GD || '0');
+
+		if (receivers.length === 0 || !token) {
+			console.warn('AICREDITS_POOLS or GOODDOLLAR missing, skipping opensource pool streamed points', {
+				address,
+				receivers,
+				token,
+			});
+			return { totalStreamedGd: '0', awardedPoints: '0' };
+		}
+
+		const totalStreamedWei = await getStreamedToReceiverWei({
+			address,
+			receivers,
+			token,
+			logPrefix: 'getAICreditsStreamPoints',
+		});
+
+		const totalStreamedGd = formatEther(totalStreamedWei);
+		const totalPoints = Math.floor(parseFloat(totalStreamedGd) * pointsPerGdFloat);
+		const awardedSoFar = await getEventBalance(address, AICREDITS_STREAM_EVENT_NAME);
+		const diff = totalPoints - awardedSoFar;
+
+		if (diff !== 0) {
+			console.log('updating AICredits streamed points', {
+				address,
+				receivers,
+				totalStreamedWei: totalStreamedWei.toString(),
+				totalPoints,
+				awardedSoFar,
+				diff,
+			});
+			await pushPointsDelta({ address, eventName: AICREDITS_STREAM_EVENT_NAME, points: diff });
+		}
+
+		return {
+			totalStreamedGd,
+			awardedPoints: String(totalPoints),
+		};
+	} catch (e: any) {
+		console.error('getAICreditsStreamPoints failed', e.message, e);
+		throw e;
+	}
+};
+
+const getAICreditsSentPoints = async (address: string): Promise<{ totalSentGd: string; awardedPoints: string }> => {
+	try {
+		const pausedPoints = await getPausedEventBalance(address, AICREDITS_SENT_EVENT_NAME);
+		if (pausedPoints !== undefined) {
+			return { totalSentGd: '0', awardedPoints: String(pausedPoints) };
+		}
+
+		const tokenAddress = globalEnv.GOODDOLLAR?.toLowerCase();
+		const receivers = parseReceivers(globalEnv.AICREDITS_POOLS);
+		const pointsPerGdFloat = parseFloat(globalEnv.AICREDITS_SENT_POINTS_PER_GD || '0');
+		if (!tokenAddress || receivers.length === 0) {
+			console.warn('GOODDOLLAR or AICREDITS_POOLS missing, skipping AI Credits sent points', {
+				address,
+				tokenAddress,
+				receivers,
+			});
+			return { totalSentGd: '0', awardedPoints: '0' };
+		}
+		const events = await getTransferEventsWithFallback(tokenAddress, address, receivers, BigInt(globalEnv.FROM_BLOCK || 20506082));
+		// const events = await getTransferEventsFromSubgraph({
+		// 	fromAddresses: [address.toLowerCase()],
+		// 	toAddresses: receivers,
+		// 	tokenAddress,
+		// 	fromBlock: globalEnv.FROM_BLOCK || 20506082,
+		// 	logPrefix: 'getOpenSourceSentPoints',
+		// });
+		console.log('getAICreditsSentPoints fetched events', { address, receivers, events: events.length });
+		const totalSentWei = events.reduce((acc, cur) => acc + BigInt(cur.value || '0'), 0n);
+		const totalSentGd = formatEther(totalSentWei);
+		const totalPoints = Math.floor(parseFloat(totalSentGd) * pointsPerGdFloat);
+		const awardedSoFar = await getEventBalance(address, AICREDITS_SENT_EVENT_NAME);
+		const diff = totalPoints - awardedSoFar;
+
+		if (diff !== 0) {
+			console.log('updating AI Credits sent points', {
+				address,
+				receivers,
+				totalSentWei: totalSentWei.toString(),
+				totalPoints,
+				awardedSoFar,
+				diff,
+			});
+			await pushPointsDelta({ address, eventName: AICREDITS_SENT_EVENT_NAME, points: diff });
+		}
+
+		return { totalSentGd, awardedPoints: String(totalPoints) };
+	} catch (e: any) {
+		console.error('getAICreditsSentPoints failed', e.message, e);
+		throw e;
+	}
+};
+
 const getOpenSourceSentPoints = async (address: string): Promise<{ totalSentGd: string; awardedPoints: string }> => {
 	try {
 		const pausedPoints = await getPausedEventBalance(address, OPENSOURCE_SENT_EVENT_NAME);
@@ -1159,14 +1266,20 @@ const fetchWalletData = async (
 	roundVotes: string;
 	roundCountedVotes: string;
 	roundVotesPoints: string;
+	aiCreditsStreamedToPool: string;
+	aiCreditsStreamedPoints: string;
+	aiCreditsSentGd: string;
+	aiCreditsSentPoints: string;
 }> => {
-	const [claims, invites, roundStreamed, opensourceStreamed, opensourceSent, roundVotes] = await Promise.all([
+	const [claims, invites, roundStreamed, opensourceStreamed, opensourceSent, roundVotes, aiCredits, aiCreditsSent] = await Promise.all([
 		getClaims(address),
 		getInviteEvents(address),
 		getRoundSplitterStreamPoints(address),
 		getOpenSourcePoolStreamPoints(address),
 		getOpenSourceSentPoints(address),
 		getRoundVotesPoints(address),
+		getAICreditsStreamPoints(address),
+		getAICreditsSentPoints(address),
 	]);
 	return {
 		claims,
@@ -1180,6 +1293,10 @@ const fetchWalletData = async (
 		roundVotes: roundVotes.totalVotes,
 		roundCountedVotes: roundVotes.countedVotes,
 		roundVotesPoints: roundVotes.awardedPoints,
+		aiCreditsStreamedToPool: aiCredits.totalStreamedGd,
+		aiCreditsStreamedPoints: aiCredits.awardedPoints,
+		aiCreditsSentGd: aiCreditsSent.totalSentGd,
+		aiCreditsSentPoints: aiCreditsSent.awardedPoints,
 	};
 };
 // reset points by fetching current points and then pushing a negative delta to reset to 0
@@ -1209,6 +1326,7 @@ export default {
 	async fetch(request, env, ctx): Promise<Response> {
 		if (request.method != 'GET') throw new Error('unsupported request type');
 		globalEnv = env as any;
+		console.log(globalEnv.BLOCKSCOUT_API_KEY);
 		const clientIp = request.headers.get('CF-Connecting-IP');
 		let url = new URL(request.url);
 		const address = getAddress(url.searchParams.get('address') as any);
